@@ -41,6 +41,7 @@ import argparse
 import os
 import re
 import sys
+import time
 
 import numpy as np
 import yaml
@@ -201,12 +202,27 @@ def process_variable(sim, var, iters, times, coords, cfg):
             chunks=(1, nx, ny),
         )
 
+        timing = {"load": 0.0, "resample": 0.0, "write": 0.0}
+        t_var = time.perf_counter()
         for i, it in enumerate(iters):
-            ugd = reader[int(it)].to_UniformGridData(
+            t0 = time.perf_counter()
+            hgd = reader[int(it)]                       # read from disk
+            t1 = time.perf_counter()
+            ugd = hgd.to_UniformGridData(               # merge + interpolate
                 resolution, min_corner, max_corner,
                 resample=resample, iteration=int(it),
             )
+            t2 = time.perf_counter()
             dset[i] = np.asarray(ugd.data).astype(out_dtype, copy=False)
+            t3 = time.perf_counter()
+            timing["load"] += t1 - t0
+            timing["resample"] += t2 - t1
+            timing["write"] += t3 - t2
+
+            if (i + 1) % 50 == 0:
+                print("[rank %d] %s: %d/%d (%.2f s/it)"
+                      % (rank, var, i + 1, n_iter,
+                         (time.perf_counter() - t_var) / (i + 1)), flush=True)
 
         # Coordinates and time axis travel with the data.
         h5.create_dataset("iterations", data=np.asarray(iters, dtype=np.int64))
@@ -222,7 +238,7 @@ def process_variable(sim, var, iters, times, coords, cfg):
         h5.attrs["resolution"] = resolution
         h5.attrs["backend"] = "kuibit"
 
-    return out_path, n_iter
+    return out_path, n_iter, timing
 
 
 # ---------------------------------------------------------------------------
@@ -241,9 +257,12 @@ def main():
     cfg = comm.bcast(cfg, root=0)
 
     log("Checkpoint Start: simulation %r (kuibit backend)" % cfg["label"])
+    t_start = time.perf_counter()
 
     # --- Open the simulation on every rank ---
+    t0 = time.perf_counter()
     sim = SimDir(cfg["simdir"])
+    log("SimDir scan: %.2f s" % (time.perf_counter() - t0))
 
     # --- Coordinate axes for the resampling grid (identical on every rank) ---
     resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
@@ -256,12 +275,14 @@ def main():
     var_iters = None
     if rank == 0:
         log("Querying iterations per variable ...")
+        t0 = time.perf_counter()
         var_iters = collect_iterations(
             sim, cfg["variables"], cfg["plane"], cfg["iteration_stride"],
             cfg["iteration_min"], cfg["iteration_max"],
         )
         for var, (iters, _) in var_iters.items():
             log("  %-26s %d iterations" % (var, iters.size))
+        log("Iteration query: %.2f s" % (time.perf_counter() - t0))
     var_iters = comm.bcast(var_iters, root=0)
 
     if not var_iters:
@@ -275,14 +296,20 @@ def main():
 
     for var in my_vars:
         iters, times = var_iters[var]
-        out_path, n_iter = process_variable(sim, var, iters, times, coords, cfg)
+        out_path, n_iter, tm = process_variable(sim, var, iters, times,
+                                                coords, cfg)
+        busy = tm["load"] + tm["resample"] + tm["write"]
         print(
-            "[rank %d] wrote %s (%d iterations)" % (rank, out_path, n_iter),
+            "[rank %d] wrote %s (%d iterations) "
+            "[load %.1f s, resample %.1f s, write %.1f s; %.2f s/it]"
+            % (rank, out_path, n_iter, tm["load"], tm["resample"],
+               tm["write"], busy / max(n_iter, 1)),
             flush=True,
         )
 
     comm.Barrier()
-    log("Checkpoint End: all variables written to %s" % cfg["output_dir"])
+    log("Checkpoint End: all variables written to %s (total wall %.1f s)"
+        % (cfg["output_dir"], time.perf_counter() - t_start))
 
 
 if __name__ == "__main__":

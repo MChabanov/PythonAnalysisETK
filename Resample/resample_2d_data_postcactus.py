@@ -36,6 +36,7 @@ import argparse
 import os
 import re
 import sys
+import time
 
 import numpy as np
 import yaml
@@ -207,12 +208,24 @@ def process_variable(sd, var, iters, times, geom, coords, cfg):
             chunks=(1, nx, ny),
         )
 
+        timing = {"read": 0.0, "write": 0.0}
+        t_var = time.perf_counter()
         for i, it in enumerate(iters):
-            slice_obj = plane_reader.read(
+            t0 = time.perf_counter()
+            slice_obj = plane_reader.read(          # read + resample
                 var, int(it), geom=geom,
                 adjust_spacing=0, order=cfg["interp_order"],
             )
+            t1 = time.perf_counter()
             dset[i] = extract_array(slice_obj).astype(out_dtype, copy=False)
+            t2 = time.perf_counter()
+            timing["read"] += t1 - t0
+            timing["write"] += t2 - t1
+
+            if (i + 1) % 50 == 0:
+                print("[rank %d] %s: %d/%d (%.2f s/it)"
+                      % (rank, var, i + 1, n_iter,
+                         (time.perf_counter() - t_var) / (i + 1)), flush=True)
 
         # Coordinates and time axis travel with the data.
         h5.create_dataset("iterations", data=np.asarray(iters, dtype=np.int64))
@@ -227,7 +240,7 @@ def process_variable(sd, var, iters, times, geom, coords, cfg):
         h5.attrs["interp_order"] = cfg["interp_order"]
         h5.attrs["resolution"] = resolution
 
-    return out_path, n_iter
+    return out_path, n_iter, timing
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +259,12 @@ def main():
     cfg = comm.bcast(cfg, root=0)
 
     log("Checkpoint Start: simulation %r" % cfg["label"])
+    t_start = time.perf_counter()
 
     # --- Open the simulation on every rank ---
+    t0 = time.perf_counter()
     sd = SimDir(cfg["simdir"])
+    log("SimDir scan: %.2f s" % (time.perf_counter() - t0))
 
     # --- Resampling geometry (identical on every rank) ---
     resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
@@ -262,12 +278,14 @@ def main():
     var_iters = None
     if rank == 0:
         log("Querying iterations per variable ...")
+        t0 = time.perf_counter()
         var_iters = collect_iterations(
             sd, cfg["variables"], cfg["iteration_stride"],
             cfg["iteration_min"], cfg["iteration_max"],
         )
         for var, (iters, _) in var_iters.items():
             log("  %-26s %d iterations" % (var, iters.size))
+        log("Iteration query: %.2f s" % (time.perf_counter() - t0))
     var_iters = comm.bcast(var_iters, root=0)
 
     if not var_iters:
@@ -281,14 +299,20 @@ def main():
 
     for var in my_vars:
         iters, times = var_iters[var]
-        out_path, n_iter = process_variable(sd, var, iters, times, geom, coords, cfg)
+        out_path, n_iter, tm = process_variable(sd, var, iters, times, geom,
+                                                coords, cfg)
+        busy = tm["read"] + tm["write"]
         print(
-            "[rank %d] wrote %s (%d iterations)" % (rank, out_path, n_iter),
+            "[rank %d] wrote %s (%d iterations) "
+            "[read+resample %.1f s, write %.1f s; %.2f s/it]"
+            % (rank, out_path, n_iter, tm["read"], tm["write"],
+               busy / max(n_iter, 1)),
             flush=True,
         )
 
     comm.Barrier()
-    log("Checkpoint End: all variables written to %s" % cfg["output_dir"])
+    log("Checkpoint End: all variables written to %s (total wall %.1f s)"
+        % (cfg["output_dir"], time.perf_counter() - t_start))
 
 
 if __name__ == "__main__":

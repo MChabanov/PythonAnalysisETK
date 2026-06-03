@@ -72,9 +72,24 @@ showed their resampled values agree to **machine precision on most iterations**;
 the only differences are a handful of points (≈0.2%) sitting exactly on
 refinement-level boundaries, where the two libraries make different choices about
 which overlapping AMR patch to sample. This is an inherent library difference,
-not a bug — pick whichever backend matches the environment you have available.
-kuibit additionally reads openPMD output and is the maintained option going
-forward.
+not a bug. kuibit additionally reads openPMD output and is the maintained
+option going forward.
+
+**Performance** (193 iterations of `rho_b`, 400×400, single process; both
+scripts print these timers):
+
+| stage          | postcactus | kuibit            |
+| -------------- | ---------- | ----------------- |
+| read + resample| 29.9 s     | 170.3 s + 161.2 s |
+| HDF5 write     | 6.6 s      | 6.3 s             |
+| per iteration  | **0.19 s** | **1.75 s**        |
+
+postcactus is ~9× faster here because its `read(geom=...)` only loads and
+interpolates the AMR components that intersect the target grid, whereas kuibit
+always reconstructs the full component hierarchy per iteration (its
+`read_on_grid` is just a wrapper around the full read; checked kuibit 1.6.1).
+**Prefer the postcactus backend for bulk resampling when it is available**;
+use kuibit where postcactus isn't installed or for openPMD data.
 
 ### Environments used here
 
