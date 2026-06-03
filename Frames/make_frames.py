@@ -21,20 +21,40 @@ The file is organised in three sections:
 
 Usage
 -----
-    mpirun -n <N> python make_frames.py
-    python make_frames.py              # serial
+    mpirun -n <N> python make_frames.py [movie_config.yaml]
+    python make_frames.py [movie_config.yaml]        # serial
+
+Without an argument the SETTINGS below are used as-is. With a YAML file
+(e.g. written by Notebooks/analysis_2D.ipynb after choosing a plot style),
+any key matching a CONFIGURABLE setting overrides it.
+
+Syncing with the notebook
+-------------------------
+The notebook imports this module and calls render_frame() directly, so
+previews there are pixel-identical to movie frames. The contract:
+
+* Everything in CONFIGURABLE travels via the YAML file - never edit those
+  values here and in the notebook separately.
+* The PANELS list (data lambdas, norms, cmaps, contour specs) is the ONE
+  piece that cannot go through YAML. When you finalise a figure in the
+  notebook, copy its panel definitions into build_panels() below.
 """
 
+import argparse
 import os
 import re
 import subprocess
 import sys
 
 import numpy as np
+import yaml
 
 import matplotlib
 
-matplotlib.use("Agg")  # headless rendering; must be set before pyplot import
+# Headless rendering for script use - but do not clobber an interactive
+# backend when imported from a notebook that already configured pyplot.
+if "matplotlib.pyplot" not in sys.modules:
+    matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
@@ -74,6 +94,7 @@ FRAME_STRIDE = 1
 
 OUT_DIR = "./frames"
 OUT_PREFIX = "rho_b"
+OUT_EXT = "png"                   # frame format; movies need png
 ZFILL = 4                         # frame number padding in file names
 MAKE_MOVIE = True                 # assemble OUT_DIR/MOVIE_NAME with ffmpeg
 FRAMERATE = 25
@@ -102,28 +123,65 @@ RHO_COLORS = ["black", "black", "black"]
 RHO_STYLES = ["dashed", "solid", "dotted"]
 RHO_LW = 1.3
 
+# --- YAML-configurable settings ----------------------------------------------
+# Keys with these names in a YAML file passed on the command line override the
+# values above. This is the full set of parameters the movie step needs
+# (besides PANELS, which stays in code - see the module docstring).
+
+CONFIGURABLE = [
+    "FIELDS",                                          # input files
+    "MSUN_TO_KM", "MILLIS", "T_MERGE",                 # units / time offsets
+    "FRAME_START", "FRAME_STOP", "FRAME_STRIDE",       # frame selection
+    "OUT_DIR", "OUT_PREFIX", "OUT_EXT", "ZFILL",       # frame output
+    "MAKE_MOVIE", "FRAMERATE", "MOVIE_NAME",           # ffmpeg
+    "FIG_ROWS", "FIG_COLS", "FIGSIZE", "DPI",          # figure layout
+    "FONT_SIZE", "SUPTITLE", "XLABEL", "YLABEL",
+    "XLIM", "YLIM", "SUBPLOTS_ADJUST", "RCPARAMS",
+    "RHO_LEVELS", "RHO_COLORS", "RHO_STYLES", "RHO_LW",  # contour specs
+]
+
+
+def apply_config(path):
+    """Override CONFIGURABLE settings from a YAML file (see notebook)."""
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    unknown = sorted(set(cfg) - set(CONFIGURABLE))
+    if unknown:
+        print("WARNING: ignoring unknown config key(s): %s"
+              % ", ".join(unknown), flush=True)
+    for key in CONFIGURABLE:
+        if key in cfg:
+            globals()[key] = cfg[key]
+
+
 # --- Panels ------------------------------------------------------------------
 # One entry per subplot, filled row-major into the FIG_ROWS x FIG_COLS grid.
 #   data(f, i)  : 2D array to show; f.data(name, i) reads field `name`
 #                 at frame i, so any numpy expression works.
 #   ref         : field whose coordinates/times label this panel.
+# Panels are built by a function (not at import time) so that YAML overrides
+# of T_MERGE / RHO_* etc. are picked up.
 
-PANELS = [
-    {
-        "title": r"$\rho;~t=$ {t:.3f} ms",
-        "ref": "rho",
-        "data": lambda f, i: f.data("rho", i),
-        "cmap": "magma",
-        "norm": colors.LogNorm(vmin=1e-10, vmax=2e-3),
-        "time_offset": T_MERGE,
-        "colorbar": True,
-        "contours": [
-            {"data": lambda f, i: f.data("rho", i), "ref": "rho",
-             "levels": RHO_LEVELS, "colors": RHO_COLORS,
-             "linestyles": RHO_STYLES, "linewidths": RHO_LW},
-        ],
-    },
-]
+def build_panels():
+    return [
+        {
+            "title": r"$\rho;~t=$ {t:.3f} ms",
+            "ref": "rho",
+            "data": lambda f, i: f.data("rho", i),
+            "cmap": "magma",
+            "norm": colors.LogNorm(vmin=1e-10, vmax=2e-3),
+            "time_offset": T_MERGE,
+            "colorbar": True,
+            "contours": [
+                {"data": lambda f, i: f.data("rho", i), "ref": "rho",
+                 "levels": RHO_LEVELS, "colors": RHO_COLORS,
+                 "linestyles": RHO_STYLES, "linewidths": RHO_LW},
+            ],
+        },
+    ]
+
+
+PANELS = build_panels()
 
 # ===========================================================================
 # 2. PLOTTING - all matplotlib code for ONE frame. Edit for your figure.
@@ -199,8 +257,8 @@ def render_frame(f, idx, seq):
     if SUPTITLE:
         fig.suptitle(SUPTITLE, fontsize=FONT_SIZE, y=0.99)
 
-    out_path = os.path.join(OUT_DIR,
-                            OUT_PREFIX + "_" + str(seq).zfill(ZFILL) + ".png")
+    out_path = os.path.join(
+        OUT_DIR, OUT_PREFIX + "_" + str(seq).zfill(ZFILL) + "." + OUT_EXT)
     fig.savefig(out_path, bbox_inches="tight", dpi=DPI)
     plt.close(fig)
     return out_path
@@ -286,6 +344,23 @@ def assemble_movie():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", nargs="?", default=None,
+                        help="Optional YAML file overriding CONFIGURABLE "
+                             "settings (e.g. written by the analysis "
+                             "notebook).")
+    args = parser.parse_args()
+
+    if args.config is not None:
+        apply_config(args.config)
+        # Rebuild panels so overridden constants (T_MERGE, RHO_*) take effect.
+        global PANELS
+        PANELS = build_panels()
+        log("Applied config overrides from %s" % args.config)
+
+    if MAKE_MOVIE and OUT_EXT != "png":
+        abort("MAKE_MOVIE requires OUT_EXT = png (got %r)" % OUT_EXT)
+
     plt.rcParams.update(RCPARAMS)
 
     if rank == 0:

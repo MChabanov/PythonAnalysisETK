@@ -21,10 +21,28 @@ staging — each rank lazily reads only the HDF5 slices for its own frames.
 ```bash
 mpirun -n 16 python make_frames.py     # parallel: frames round-robin over ranks
 python make_frames.py                  # serial fallback (no mpi4py needed)
+
+# with a config YAML (e.g. written by Notebooks/analysis_2D.ipynb):
+mpirun -n 16 python make_frames.py movie_config.yaml
 ```
 
 Any rank count works; output PNGs are numbered contiguously so the ffmpeg
 pattern always matches, even with `FRAME_STRIDE > 1`.
+
+## Config YAML and notebook hand-off
+
+`Notebooks/analysis_2D.ipynb` is the place to *choose* a plot: it imports this
+module, previews frames with the real `render_frame()`, and writes
+`movie_config.yaml` containing every movie parameter (the key set is
+`CONFIGURABLE` in `make_frames.py`: input files, units, frame selection,
+output/ffmpeg options, figure layout, contour specs). Passing that file on the
+command line overrides the SETTINGS section — so those values never need
+editing in two places.
+
+**The one thing that must be kept in sync by hand is `PANELS`** (data lambdas,
+norms, colormaps, contour wiring): lambdas can't travel through YAML. When a
+figure is final in the notebook, copy its panel dicts into `build_panels()`
+here.
 
 ## Defining panels
 

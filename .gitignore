@@ -221,3 +221,4 @@ __marimo__/
 *.h5
 *.hdf5
 Resample/resampled/
+Notebooks/_preview/
