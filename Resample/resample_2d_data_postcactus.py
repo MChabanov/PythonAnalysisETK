@@ -41,11 +41,8 @@ import time
 import numpy as np
 import yaml
 
-import postcactus as pc
 from postcactus.simdir import SimDir
 from postcactus import grid_data as gd
-from postcactus import cactus_grid_h5 as cgr
-from postcactus import cactus_grid_ascii as cgra
 
 from mpi4py import MPI
 
@@ -121,16 +118,18 @@ def grid_bounds(grid):
 # Simulation metadata (computed on rank 0, broadcast to all)
 # ---------------------------------------------------------------------------
 
-def collect_iterations(sd, variables, stride, it_min, it_max):
+def collect_iterations(sd, variables, plane, stride, it_min, it_max):
     """Return {variable: (iterations, times)} for every variable that exists.
 
     Iterations are queried per-variable because different variables can be
     written at different cadences. Variables with no 2D data are dropped with
     a warning.
+
+    `sd.grid` is a cached omni reader (HDF5 + ASCII) per plane, the same one
+    process_variable reads from - so the data files are scanned only once,
+    and the iterations match the plane actually being resampled.
     """
-    hdf5 = cgr.GridH5Dir(sd)
-    ascii = cgra.GridASCIIDir(sd)
-    reader = pc.cactus_grid_omni.GridOmniReader((0, 1), [hdf5, ascii])
+    reader = getattr(sd.grid, plane)
 
     result = {}
     for var in variables:
@@ -280,7 +279,7 @@ def main():
         log("Querying iterations per variable ...")
         t0 = time.perf_counter()
         var_iters = collect_iterations(
-            sd, cfg["variables"], cfg["iteration_stride"],
+            sd, cfg["variables"], cfg["plane"], cfg["iteration_stride"],
             cfg["iteration_min"], cfg["iteration_max"],
         )
         for var, (iters, _) in var_iters.items():
