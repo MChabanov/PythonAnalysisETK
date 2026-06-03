@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Einstein Toolkit / resampling pipeline data (large binaries, not source)
+*.h5
+*.hdf5
+Resample/resampled/

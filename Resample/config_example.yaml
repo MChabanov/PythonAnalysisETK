@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# Configuration for the 2D resampling pipeline.
+#
+# Copy this file, edit it for your simulation, and run:
+#
+#     mpirun -n <N> python resample_2d.py my_config.yaml
+#
+# resample_2d.py dispatches to the backend named below. You can also run a
+# backend script directly (resample_2d_data_postcactus.py /
+# resample_2d_data_kuibit.py).
+#
+# N (the number of MPI ranks) can be anything >= 1. Variables are distributed
+# round-robin across ranks, so there is no required process count and no rank
+# ever needs more memory than a single 2D slice at a time.
+# ---------------------------------------------------------------------------
+
+# Which reader library to use, when launched via resample_2d.py:
+#   postcactus  -> resample_2d_data_postcactus.py (original library)
+#   kuibit      -> resample_2d_data_kuibit.py     (maintained successor)
+# Ignored if you run a backend script directly. Defaults to postcactus.
+backend: postcactus
+
+# Absolute path to the Einstein Toolkit simulation directory.
+simdir: /mnt/raarchive/chabanov/direct_Urca_runs/dU_10_15_linear_HR
+
+# Short label used in output file names (e.g. rho_b__dU_10_15_linear_HR.h5).
+label: dU_10_15_linear_HR
+
+# Directory where the resampled HDF5 files are written (created if missing).
+output_dir: ./resampled
+
+# Slice plane to read: one of xy, xz, yz.
+plane: xy
+
+# Resampling grid -----------------------------------------------------------
+grid:
+  # Number of grid POINTS along each axis (not cells).
+  resolution: [1000, 1000]
+  # Square box [-box_bound, +box_bound] in each direction.
+  # For a non-square box, set min/max explicitly instead (see below).
+  box_bound: 50.0
+  # Optional explicit bounds; if given they override box_bound.
+  # min: [-50.0, -50.0]
+  # max: [ 50.0,  50.0]
+
+# Interpolation order for resampling (postcactus `order`): 0 = nearest, 1 = linear.
+interp_order: 1
+
+# Output storage dtype. float32 halves file size; float64 preserves full precision.
+dtype: float64
+
+# Subsample iterations: keep every Nth available iteration (1 = keep all).
+iteration_stride: 1
+
+# Optionally restrict the iteration range (null = no limit).
+iteration_min: null
+iteration_max: null
+
+# gzip compression level for the HDF5 datasets (0-9; null disables compression).
+compression_level: 4
+
+# Variables to resample and store. Each becomes its own HDF5 file.
+variables:
+  - rho_b
+  - pi
+  - bulkRelax
+  - bulkVisInvRelax
+  - bulkVis
+  - expansion_scalar
+  - kin_vorticity_spatial_xy
+  - temp
+  - vel[0]
+  - vel[1]
+  - betax
+  - betay
+  - alp
+  - w_lorentz
+  - P
+  - int_energy
