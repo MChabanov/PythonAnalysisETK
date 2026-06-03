@@ -23,6 +23,17 @@ backend: postcactus
 # Absolute path to the Einstein Toolkit simulation directory.
 simdir: /mnt/raarchive/chabanov/direct_Urca_runs/dU_10_15_linear_HR
 
+# Optional: cache the scanned SimDir as a pickle to speed up startup.
+#   pickled: no   -> scan `simdir` normally; if `path` is set, the SimDir is
+#                    saved there after the iteration query (the pickle then
+#                    also carries the parsed HDF5 metadata).
+#   pickled: yes  -> skip the scan entirely and load the SimDir from `path`.
+# Re-create the pickle (pickled: no) whenever the simulation gains new output;
+# a stale pickle will silently miss the new iterations.
+# simdir_pickle:
+#   pickled: no
+#   path: ./simdir_cache.pkl
+
 # Short label used in output file names (e.g. rho_b__dU_10_15_linear_HR.h5).
 label: dU_10_15_linear_HR
 

@@ -16,6 +16,7 @@ MPI structure, and on-disk schema, so output files are read by the same
 | `resample_2d.py`                | Launcher — dispatches to the backend named in config.  |
 | `resample_2d_data_postcactus.py`| MPI-parallel resampler — **postcactus** backend.       |
 | `resample_2d_data_kuibit.py`    | MPI-parallel resampler — **kuibit** backend (same out).|
+| `resample_common.py`            | Shared helpers: MPI/config/pickle-cache/iterations.    |
 | `config_example.yaml`           | Documented template config; copy and edit per sim.     |
 | `read_data.py`                  | Helpers to read the HDF5 output back into numpy.        |
 
@@ -39,6 +40,31 @@ never holds more than one 2D slice in memory.
 
 Output goes to `output_dir` as `<variable>__<label>.h5`, e.g.
 `rho_b__dU_10_15_linear_HR.h5`.
+
+## Startup cost and the SimDir pickle cache
+
+The simulation directory is scanned (and the per-variable iteration lists
+queried) **on rank 0 only** and then broadcast to all ranks, so the filesystem
+is hit once per job regardless of `-n`. On top of that, the scan result can be
+cached on disk between jobs:
+
+```yaml
+simdir_pickle:
+  pickled: no                 # this run scans, then saves the pickle
+  path: ./simdir_cache.pkl
+```
+
+The first run (`pickled: no`) scans normally and saves the SimDir — including
+the parsed HDF5 metadata — to `path`. Subsequent runs with `pickled: yes` load
+it from there and skip the directory walk and metadata parsing entirely. This
+matters most on network filesystems (Lustre/GPFS), where metadata operations
+dominate startup time.
+
+**Caveat:** the pickle is a snapshot. If the simulation produces new output,
+rerun once with `pickled: no` to refresh it; a stale pickle silently misses
+the new iterations. (For the postcactus backend this feature needs the
+PyCactus `dev` branch ≥ `b71cf5d`, which made its SimDir picklable; kuibit
+supports pickling natively.)
 
 ## Reading the output
 
