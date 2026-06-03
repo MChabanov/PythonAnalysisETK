@@ -4,6 +4,8 @@
 postcactus backend. It reads grid data through postcactus, resamples each
 requested variable onto a fixed regular grid, and writes one HDF5 file per
 variable. See ``resample_2d_data_kuibit.py`` for the equivalent kuibit backend.
+Backend-agnostic helpers (MPI setup, config, pickled-SimDir cache, iteration
+bookkeeping) are shared between the backends via ``resample_common.py``.
 
 Design notes
 ------------
@@ -18,6 +20,11 @@ Design notes
 * **Correct per-variable iterations.** Iteration/time lists are queried *per
   variable* (different variables may be output at different cadences), computed
   once on rank 0 and broadcast.
+* **Scan once, broadcast.** The SimDir is opened and queried on rank 0 only,
+  then broadcast (with its parsed HDF5 tables of contents) to all ranks, so
+  the simulation directory is scanned a single time per job. With
+  ``simdir_pickle`` in the config, the scan can also be cached on disk and
+  reused across jobs.
 * **Self-describing output.** Each file stores the iterations, physical times,
   and coordinate axes alongside the data, plus metadata as attributes.
 
@@ -34,141 +41,25 @@ See ``config_example.yaml`` for all options. Read the output with
 
 import argparse
 import os
-import re
-import sys
 import time
 
 import numpy as np
-import yaml
 
 from postcactus.simdir import SimDir
 from postcactus import grid_data as gd
 
-from mpi4py import MPI
-
 import h5py
 
-
-# ---------------------------------------------------------------------------
-# MPI setup
-# ---------------------------------------------------------------------------
-
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
-
-
-def log(message):
-    """Print a progress message from rank 0 only, flushed immediately."""
-    if rank == 0:
-        print(message, flush=True)
-
-
-def abort(message):
-    """Print an error on rank 0 and tear down all ranks cleanly."""
-    if rank == 0:
-        print("ERROR: " + message, file=sys.stderr, flush=True)
-    comm.Abort(1)
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-def load_config(path):
-    """Load and validate the YAML configuration on rank 0."""
-    with open(path) as f:
-        cfg = yaml.safe_load(f)
-
-    required = ["simdir", "label", "variables"]
-    missing = [k for k in required if k not in cfg or cfg[k] is None]
-    if missing:
-        abort("config is missing required key(s): " + ", ".join(missing))
-
-    # Fill in defaults.
-    cfg.setdefault("output_dir", "./resampled")
-    cfg.setdefault("plane", "xy")
-    cfg.setdefault("interp_order", 1)
-    cfg.setdefault("dtype", "float64")
-    cfg.setdefault("iteration_stride", 1)
-    cfg.setdefault("iteration_min", None)
-    cfg.setdefault("iteration_max", None)
-    cfg.setdefault("compression_level", 4)
-
-    grid = cfg.setdefault("grid", {})
-    grid.setdefault("resolution", [1000, 1000])
-    grid.setdefault("box_bound", 50.0)
-
-    if cfg["plane"] not in ("xy", "xz", "yz"):
-        abort("plane must be one of xy, xz, yz (got %r)" % cfg["plane"])
-
-    return cfg
-
-
-def grid_bounds(grid):
-    """Return (resolution, min_corner, max_corner) as lists from the config."""
-    resolution = list(grid["resolution"])
-    if grid.get("min") is not None and grid.get("max") is not None:
-        return resolution, list(grid["min"]), list(grid["max"])
-    b = float(grid["box_bound"])
-    return resolution, [-b, -b], [b, b]
-
-
-# ---------------------------------------------------------------------------
-# Simulation metadata (computed on rank 0, broadcast to all)
-# ---------------------------------------------------------------------------
-
-def collect_iterations(sd, variables, plane, stride, it_min, it_max):
-    """Return {variable: (iterations, times)} for every variable that exists.
-
-    Iterations are queried per-variable because different variables can be
-    written at different cadences. Variables with no 2D data are dropped with
-    a warning.
-
-    `sd.grid` is a cached omni reader (HDF5 + ASCII) per plane, the same one
-    process_variable reads from - so the data files are scanned only once,
-    and the iterations match the plane actually being resampled.
-    """
-    reader = getattr(sd.grid, plane)
-
-    result = {}
-    for var in variables:
-        try:
-            iters = np.asarray(reader.get_iters(var), dtype=np.int64)
-            times = np.asarray(reader.get_times(var), dtype=np.float64)
-        except Exception as exc:  # noqa: BLE001 - report and skip
-            log("  WARNING: skipping %r (could not read iterations: %s)" % (var, exc))
-            continue
-
-        if iters.size == 0:
-            log("  WARNING: skipping %r (no 2D data found)" % var)
-            continue
-
-        # Restrict range, then subsample.
-        mask = np.ones(iters.shape, dtype=bool)
-        if it_min is not None:
-            mask &= iters >= it_min
-        if it_max is not None:
-            mask &= iters <= it_max
-        iters, times = iters[mask], times[mask]
-        iters, times = iters[::stride], times[::stride]
-
-        if iters.size == 0:
-            log("  WARNING: skipping %r (no iterations left after range/stride)" % var)
-            continue
-
-        result[var] = (iters, times)
-    return result
+from resample_common import (
+    comm, rank, size, log, abort,
+    load_config, grid_bounds, safe_filename,
+    open_simdir, save_simdir_pickle, collect_iterations,
+)
 
 
 # ---------------------------------------------------------------------------
 # Per-variable processing
 # ---------------------------------------------------------------------------
-
-def safe_filename(name):
-    """Turn a variable name like 'vel[0]' into a filesystem-safe token."""
-    return re.sub(r"[^0-9A-Za-z._-]+", "_", name).strip("_")
-
 
 def extract_array(slice_obj):
     """Return the underlying numpy array from a postcactus resampled slice."""
@@ -260,11 +151,6 @@ def main():
     log("Checkpoint Start: simulation %r" % cfg["label"])
     t_start = time.perf_counter()
 
-    # --- Open the simulation on every rank ---
-    t0 = time.perf_counter()
-    sd = SimDir(cfg["simdir"])
-    log("SimDir scan: %.2f s" % (time.perf_counter() - t0))
-
     # --- Resampling geometry (identical on every rank) ---
     resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
     geom = gd.RegGeom(resolution, min_corner, x1=max_corner)
@@ -273,19 +159,40 @@ def main():
         np.linspace(min_corner[1], max_corner[1], resolution[1]),
     )
 
-    # --- Per-variable iterations: compute once on rank 0, broadcast ---
+    # --- Open the simulation and query iterations on rank 0 only, then
+    # broadcast. The SimDir is broadcast *after* the iteration query so the
+    # parsed HDF5 tables of contents travel with it and no other rank has to
+    # re-scan directories or re-parse file metadata. ---
+    sd = None
     var_iters = None
     if rank == 0:
+        t0 = time.perf_counter()
+        sd = open_simdir(cfg, SimDir)
+        log("SimDir ready: %.2f s" % (time.perf_counter() - t0))
+
         log("Querying iterations per variable ...")
         t0 = time.perf_counter()
+        # sd.grid is a cached omni reader (HDF5 + ASCII) per plane, the same
+        # one process_variable reads from - so the data files are scanned
+        # only once, and the iterations match the plane actually resampled.
+        plane_reader = getattr(sd.grid, cfg["plane"])
         var_iters = collect_iterations(
-            sd, cfg["variables"], cfg["plane"], cfg["iteration_stride"],
+            lambda var: (plane_reader.get_iters(var), plane_reader.get_times(var)),
+            cfg["variables"], cfg["iteration_stride"],
             cfg["iteration_min"], cfg["iteration_max"],
         )
         for var, (iters, _) in var_iters.items():
             log("  %-26s %d iterations" % (var, iters.size))
         log("Iteration query: %.2f s" % (time.perf_counter() - t0))
+
+        # Save after the query so the pickle includes the parsed TOCs.
+        if cfg["simdir_pickle"]["path"] and not cfg["simdir_pickle"]["pickled"]:
+            save_simdir_pickle(sd, cfg)
+
+    t0 = time.perf_counter()
+    sd = comm.bcast(sd, root=0)
     var_iters = comm.bcast(var_iters, root=0)
+    log("Broadcast SimDir + iterations: %.2f s" % (time.perf_counter() - t0))
 
     if not var_iters:
         abort("no variables with usable 2D data were found.")
