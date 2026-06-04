@@ -66,6 +66,27 @@ the new iterations. (For the postcactus backend this feature needs the
 PyCactus `dev` branch ≥ `b71cf5d`, which made its SimDir picklable; kuibit
 supports pickling natively.)
 
+### Excluding checkpoints / 3D data from the scan
+
+Simulation directories are often dominated by files irrelevant to 2D
+resampling: checkpoint sets (`checkpoint.chkpt.it_*.file_*.h5`, one file per
+MPI process per checkpoint) and per-process 3D output. The postcactus backend
+can skip them (needs PyCactus `dev` ≥ the `exclude_dirs/exclude_files` commit):
+
+```yaml
+simdir_exclude:
+  dirs: [checkpoints, 3D]                  # folder names pruned from the walk
+  files: ["checkpoint.chkpt.*", "*.xyz.h5"]  # basename globs dropped
+```
+
+`dirs` prunes whole subtrees and is what actually cuts scan time — organise
+bulky output into such folders (or move it out of the simulation directory
+entirely; symlinked folders are also skipped). `files` only filters the
+results (the walk still lists every entry), useful when checkpoints sit in
+the same folders as the 2D data. **Make sure the globs never match the files
+you resample** (`*.xy.h5` etc.) or the parfiles. The kuibit backend ignores
+this option (kuibit's SimDir has no equivalent) and warns if it is set.
+
 ## Reading the output
 
 ```python

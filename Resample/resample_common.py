@@ -82,6 +82,15 @@ def load_config(path):
     if sp["pickled"] and not os.path.isfile(sp["path"]):
         abort("simdir_pickle.path does not exist: %r" % sp["path"])
 
+    # Scan exclusions, honoured by the postcactus backend only.
+    se = cfg.get("simdir_exclude") or {}
+    for key in ("dirs", "files"):
+        val = se.get(key) or []
+        if isinstance(val, str):
+            val = [val]
+        se[key] = [str(v) for v in val]
+    cfg["simdir_exclude"] = se
+
     if cfg["plane"] not in ("xy", "xz", "yz"):
         abort("plane must be one of xy, xz, yz (got %r)" % cfg["plane"])
 

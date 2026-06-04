@@ -34,6 +34,19 @@ simdir: /mnt/raarchive/chabanov/direct_Urca_runs/dU_10_15_linear_HR
 #   pickled: no
 #   path: ./simdir_cache.pkl
 
+# Optional scan exclusions (postcactus backend only; ignored by kuibit).
+#   dirs:  folder NAMES skipped entirely during the scan - this is what
+#          actually saves time, since whole subtrees are pruned. Move
+#          checkpoints/3D output into such folders for fast scans.
+#   files: fnmatch-style basename globs dropped from the scan results.
+#          Does NOT speed up the directory walk itself (entries must be
+#          listed before they can be matched) but keeps e.g. mixed-in
+#          checkpoint files out of the file list and the pickle.
+# CAREFUL: patterns must not match files you need (2D *.xy.h5, *.par).
+# simdir_exclude:
+#   dirs: [checkpoints, 3D]
+#   files: ["checkpoint.chkpt.*", "*.xyz.h5", "*.file_*.h5"]
+
 # Short label used in output file names (e.g. rho_b__dU_10_15_linear_HR.h5).
 label: dU_10_15_linear_HR
 

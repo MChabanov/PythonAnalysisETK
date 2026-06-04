@@ -167,7 +167,14 @@ def main():
     var_iters = None
     if rank == 0:
         t0 = time.perf_counter()
-        sd = open_simdir(cfg, SimDir)
+        # simdir_exclude prunes the scan; irrelevant (already baked in)
+        # when the SimDir is loaded from a pickle.
+        excl = cfg["simdir_exclude"]
+        sd = open_simdir(cfg, lambda path: SimDir(
+            path,
+            exclude_dirs=excl["dirs"] or None,
+            exclude_files=excl["files"] or None,
+        ))
         log("SimDir ready: %.2f s" % (time.perf_counter() - t0))
 
         log("Querying iterations per variable ...")

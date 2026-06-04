@@ -165,6 +165,9 @@ def main():
     var_iters = None
     if rank == 0:
         t0 = time.perf_counter()
+        if cfg["simdir_exclude"]["dirs"] or cfg["simdir_exclude"]["files"]:
+            log("  WARNING: simdir_exclude is not supported by the kuibit "
+                "backend and will be ignored")
         sim = open_simdir(cfg, SimDir)
         log("SimDir ready: %.2f s" % (time.perf_counter() - t0))
 
