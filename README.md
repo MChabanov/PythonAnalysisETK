@@ -24,9 +24,12 @@ conda activate etk-analysis
 # kuibit (resample kuibit backend, GW-extraction notebooks) — needs Python >= 3.9:
 pip install kuibit
 
-# postcactus (resample postcactus backend, Archive scripts) — not on PyPI,
-# install from Wolfgang Kastaun's PyCactus repository:
-pip install "git+https://github.com/wokast/PyCactus.git#subdirectory=PostCactus"
+# postcactus (resample postcactus backend, Archive scripts) — not on PyPI.
+# NOTE: the resampling pipeline's startup features (simdir_pickle cache,
+# simdir_exclude, scan-once-and-broadcast) require the `dev` branch of
+# https://github.com/MChabanov/PyCactus — a fork of wokast/PyCactus with a
+# picklable SimDir and scan-exclusion options. Install from there:
+pip install "git+https://github.com/MChabanov/PyCactus.git@dev#subdirectory=PostCactus"
 ```
 
 What each package is needed for:

@@ -62,9 +62,10 @@ dominate startup time.
 
 **Caveat:** the pickle is a snapshot. If the simulation produces new output,
 rerun once with `pickled: no` to refresh it; a stale pickle silently misses
-the new iterations. (For the postcactus backend this feature needs the
-PyCactus `dev` branch ≥ `b71cf5d`, which made its SimDir picklable; kuibit
-supports pickling natively.)
+the new iterations. (For the postcactus backend this feature needs the `dev`
+branch of [MChabanov/PyCactus](https://github.com/MChabanov/PyCactus)
+≥ `b71cf5d`, which made its SimDir picklable; kuibit supports pickling
+natively.)
 
 ### Excluding checkpoints / 3D data from the scan
 
