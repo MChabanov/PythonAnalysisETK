@@ -75,7 +75,11 @@ def _parse_mesh_name(mesh_name):
 
 
 def read_plane_file(filepath):
-    """Read a single openPMD plane file with all levels/patches.
+    """Read a single openPMD plane file or directory with all levels/patches.
+
+    Handles both:
+    - Single files: file.bp5
+    - ADIOS2 parallel directories: file.bp5/ (contains data.0, data.1, ...)
 
     Return (iteration, structured_data, time_cu) where structured_data is:
     {variable_name: {level: {patch_id: (array, x_coords, y_coords)}, ...}}

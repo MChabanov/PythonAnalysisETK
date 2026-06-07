@@ -204,7 +204,10 @@ class SliceExtractor:
 
 
 def read_and_plot_3d(filepath, args, out_dir):
-    """Read 3D file and create slice plots; return list of frame paths."""
+    """Read 3D file or directory and create slice plots; return list of frame paths.
+
+    Handles both single files and ADIOS2 parallel directories.
+    """
     try:
         import openpmd_api as io
     except ImportError:

@@ -18,14 +18,19 @@ def quick_diagnose(data_dir):
 
     print(f"Quick Diagnostic: {data_dir}\n")
 
-    # Find openPMD files with simple glob
-    bp_files = glob.glob(os.path.join(data_dir, "*.bp5")) + \
-               glob.glob(os.path.join(data_dir, "*.bp4")) + \
-               glob.glob(os.path.join(data_dir, "*.bp")) + \
-               glob.glob(os.path.join(data_dir, "*.h5"))
+    # Find openPMD files (both files and ADIOS2 directories)
+    bp_files = []
 
-    # Filter out metadata and lock files
-    bp_files = [f for f in bp_files if ".md." not in f and not f.endswith(".dir")]
+    for pattern in ["*.bp5", "*.bp4", "*.bp", "*.h5"]:
+        for path in glob.glob(os.path.join(data_dir, pattern)):
+            # Skip metadata and lock files
+            if ".md." in os.path.basename(path) or path.endswith(".dir"):
+                continue
+
+            # Accept both regular files and directories (ADIOS2 parallel mode)
+            if os.path.isfile(path) or os.path.isdir(path):
+                bp_files.append(path)
+
     bp_files = sorted(bp_files)
 
     if not bp_files:

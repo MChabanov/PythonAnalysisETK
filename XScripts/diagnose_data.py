@@ -35,9 +35,20 @@ def find_openpmd_files(root_dir, max_depth=3):
                 for ext in ("bp5", "bp4", "bp", "h5"):
                     if filename.endswith(f".{ext}"):
                         filepath = os.path.join(root, filename)
-                        # Verify it's a file (not a link or special file)
-                        if os.path.isfile(filepath):
+                        # Accept both files and directories (ADIOS2 parallel mode)
+                        if os.path.isfile(filepath) or os.path.isdir(filepath):
                             files.append(filepath)
+                        break
+
+            # Also check directories in this level (ADIOS2 format)
+            for dirname in dirs:
+                if ".md." in dirname or dirname.endswith(".dir"):
+                    continue
+                for ext in ("bp5", "bp4", "bp", "h5"):
+                    if dirname.endswith(f".{ext}"):
+                        dirpath = os.path.join(root, dirname)
+                        if os.path.isdir(dirpath):
+                            files.append(dirpath)
                         break
     except OSError as e:
         print(f"WARNING: Error scanning directory: {e}")

@@ -31,14 +31,22 @@ def setup_matplotlib_style(use_tex=None):
 
 
 def gather_openpmd_series(data_dir, pattern="*.bp*"):
-    """Find all openPMD series files in a directory, excluding metadata/lock files."""
+    """Find all openPMD series files/directories in a directory.
+
+    Handles both:
+    - Single files: simulation.it00000000.bp5
+    - ADIOS2 parallel directories: simulation.it00000000.bp5/ (with data.0, data.1, ...)
+    """
     data_dir = os.path.abspath(os.path.expanduser(data_dir))
     files = []
     for ext in ("bp5", "bp", "bp4", "h5"):
         pattern_ext = os.path.join(data_dir, f"*.it*.{ext}")
         for f in glob.glob(pattern_ext):
-            # Skip metadata/lock files
-            if ".md." not in f and not f.endswith(".dir"):
+            # Skip metadata and lock files
+            if ".md." in os.path.basename(f) or f.endswith(".dir"):
+                continue
+            # Accept both files (single-file ADIOS2) and directories (parallel ADIOS2)
+            if os.path.isfile(f) or os.path.isdir(f):
                 files.append(f)
     return sorted(files)
 
