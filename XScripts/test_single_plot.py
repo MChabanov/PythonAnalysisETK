@@ -32,17 +32,13 @@ overall_timer = Timer()
 overall_timer.__enter__()
 
 # Configuration
-DATA_DIR = "/lagoon/michailchabanov/frontier/production_trial/dev-trial7-long-plane"
-PLANE_TYPE = "xy_z_pos0000p000"  # Which plane to plot
-ITERATION = "it00000000"  # Which snapshot
+DATA_DIR = "/lagoon/michailchabanov/frontier/production_trial/dev-trial7-long-plane/parfile.xy_z_pos0000p000.it00000000.bp5"
 VARIABLE = "hydrobasex_rho"  # Which variable to plot
 OUTPUT_FILE = "test_rho_xy_z.png"
 
 print(f"Test Plot: Single Variable Visualization")
 print("=" * 80)
-print(f"Directory:   {DATA_DIR}")
-print(f"Plane:       {PLANE_TYPE}")
-print(f"Snapshot:    {ITERATION}")
+print(f"File:        {DATA_DIR}")
 print(f"Variable:    {VARIABLE}")
 print(f"Output:      {OUTPUT_FILE}")
 print("=" * 80 + "\n")
@@ -51,18 +47,13 @@ print("=" * 80 + "\n")
 with Timer("Setup matplotlib"):
     opc.setup_matplotlib_style()
 
-# Find the file
-with Timer("Find file") as t_find:
-    import glob
-    pattern = os.path.join(DATA_DIR, f"{PLANE_TYPE}.{ITERATION}.bp5")
-    files = glob.glob(pattern)
-
-if not files:
-    print(f"✗ File not found matching: {pattern}")
-    sys.exit(1)
-
-filepath = files[0]
-print(f"Found file: {os.path.basename(filepath)}\n")
+# Verify the file/directory exists
+with Timer("Verify path"):
+    filepath = DATA_DIR
+    if not (os.path.isfile(filepath) or os.path.isdir(filepath)):
+        print(f"✗ Path not found: {filepath}")
+        sys.exit(1)
+    print(f"Found: {os.path.basename(filepath)}\n")
 
 # Read with openpmd_api
 try:
