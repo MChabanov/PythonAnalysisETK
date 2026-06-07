@@ -27,6 +27,28 @@ file. This is normal for ADIOS2 parallel output. Pass the `.bp5` directory path
 directly to `openpmd_api` or to these scripts; `openpmd_api` handles the metadata
 and `data.*` files internally.
 
+## Plane Tag Naming
+
+PlanesX plane files and mesh names use a tag of the form:
+
+```text
+<plane>_<normal-axis>_<sign><integer-digits>p<fraction-digits>
+```
+
+Examples:
+
+- `xy_z_pos0012p500` means an `xy` plane at `z = +12.5`.
+- `xz_y_neg0003p000` means an `xz` plane at `y = -3.0`.
+
+The number of integer and fractional digits is configurable in Einstein Toolkit
+with `planes_int_precision` and `planes_frac_precision`, so the parser accepts
+variable-width tags such as `xy_z_pos12p5` and `xy_z_pos0012p500`.
+
+Mesh names may also include a two-character in-plane centering suffix before
+`patch`/`lev`, for example `_cv` or `_vc`. The plotting scripts strip that suffix
+from the group name and use the openPMD component name as the plotted variable
+label whenever possible.
+
 ## Files
 
 | File | Purpose |
@@ -62,7 +84,7 @@ nearest-neighbor sampling. `imageio` and ffmpeg are only needed for movies.
 Start with a quick scan:
 
 ```bash
-python XScripts/quick_diagnose.py /path/to/output --inspect
+python XScripts/quick_diagnose.py /path/to/output hydrobasex_rho --inspect
 ```
 
 Inspect mesh names if variable matching is unclear:
@@ -82,7 +104,17 @@ Plot 2D PlanesX output:
 ```bash
 python XScripts/plot_2d_planes.py /path/to/planes \
   --variable hydrobasex_rho \
+  --plane xy \
   --nxny 1024 \
+  --out-dir planes_frames \
+  --no-movie
+```
+
+Plot one BP5 series directly:
+
+```bash
+python XScripts/plot_2d_planes.py /path/to/parfile.xy_z_pos0000p000.it00000000.bp5 \
+  --variable hydrobasex_rho \
   --out-dir planes_frames \
   --no-movie
 ```
@@ -115,6 +147,10 @@ Useful options:
 
 ```bash
 --variable TEXT      variable/mesh/component substring to plot
+--tag TAG            exact plane tag, e.g. xy_z_pos0012p500
+--plane xy           select one plane family: xy, xz, or yz
+--normal-axis z      select by plane normal axis
+--elevation 12.5     select by parsed plane elevation
 --nxny N            output canvas size, default 1024
 --method linear     linear interpolation, falls back to nearest without scipy
 --method nearest    nearest-neighbor sampling
@@ -142,9 +178,10 @@ and reports that choice.
 
 ## Diagnostics
 
-`quick_diagnose.py` is the first-pass tool. With `--inspect`, it opens one 2D
-and/or 3D sample and reports mesh count, parseable AMR names, components, and
-shapes without loading field data.
+`quick_diagnose.py` is the first-pass tool. It accepts either a directory or one
+openPMD series path. With `--inspect`, or when a variable is provided, it opens
+one 2D and/or 3D sample and reports mesh count, parsed plane tag, parseable AMR
+names, components, and shapes without loading field data.
 
 `inspect_chunks.py` is the most important data-safety diagnostic. It reports how
 much of each declared mesh is actually written. Use it when plots look wrong or

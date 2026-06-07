@@ -25,30 +25,13 @@ def _safe_name(text):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
 
 
-def _parse_mesh_name(mesh_name):
-    patterns = (
-        r"(.+?)_patch0*(\d+)_lev0*(\d+)(?:$|_)",
-        r"(.+?)_lev0*(\d+)_patch0*(\d+)(?:$|_)",
-    )
-    for pattern in patterns:
-        match = re.match(pattern, mesh_name)
-        if not match:
-            continue
-        label = match.group(1)
-        if "patch" in pattern.split("_")[1]:
-            return label, int(match.group(3)), int(match.group(2))
-        return label, int(match.group(2)), int(match.group(3))
-    return None, None, None
-
-
 def _find_field_groups(iteration, variable_filter=None):
     """Return {label: {level: [(patch, mesh_name, mesh, comp)]}}."""
-    variable_filter = variable_filter.lower() if variable_filter else None
     groups = {}
 
     for mesh_name in sorted(iteration.meshes):
-        label, level, patch = _parse_mesh_name(mesh_name)
-        if label is None:
+        mesh_info = opc.parse_amr_mesh_name(mesh_name)
+        if mesh_info is None:
             continue
 
         mesh = iteration.meshes[mesh_name]
@@ -57,13 +40,11 @@ def _find_field_groups(iteration, variable_filter=None):
             continue
 
         for comp in components:
-            comp_label = label if len(components) == 1 else f"{label}_{comp}"
-            if variable_filter:
-                haystack = f"{mesh_name} {comp_label} {comp}".lower()
-                if variable_filter not in haystack:
-                    continue
-            groups.setdefault(comp_label, {}).setdefault(level, []).append(
-                (patch, mesh_name, mesh, comp)
+            comp_label = opc.component_label(mesh_info, comp, len(components))
+            if not opc.mesh_matches_variable(mesh_name, comp, variable_filter, mesh_info):
+                continue
+            groups.setdefault(comp_label, {}).setdefault(mesh_info["level"], []).append(
+                (mesh_info["patch"], mesh_name, mesh, comp)
             )
 
     return groups
@@ -272,7 +253,7 @@ def process_file(filepath, args, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("data_dir", help="Directory containing 3D .bp*/.h5 series")
+    parser.add_argument("data_path", help="Directory or one 3D .bp*/.h5 series")
     parser.add_argument("--axes", default="xy,xz,yz", help="Comma-separated xy,xz,yz")
     parser.add_argument("--variable", default=None, help="Variable substring to plot")
     parser.add_argument("--all-variables", action="store_true")
@@ -297,14 +278,10 @@ def main():
 
     opc.setup_matplotlib_style()
 
-    data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
-    if not os.path.isdir(data_dir):
-        print(f"ERROR: not a directory: {data_dir}")
-        return 1
-
-    files = opc.gather_openpmd_series(data_dir)
+    data_path = os.path.abspath(os.path.expanduser(args.data_path))
+    files = opc.gather_openpmd_series(data_path)
     if not files:
-        print(f"ERROR: no openPMD series found in {data_dir}")
+        print(f"ERROR: no openPMD series found in {data_path}")
         return 1
 
     os.makedirs(args.out_dir, exist_ok=True)

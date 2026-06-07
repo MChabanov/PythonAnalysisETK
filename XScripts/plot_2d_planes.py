@@ -18,27 +18,6 @@ from matplotlib.colors import LogNorm
 import openpmd_common as opc
 
 
-def _parse_mesh_name(mesh_name):
-    """Return (variable_label, level, patch_id) when a mesh name is parseable."""
-    patterns = (
-        r"(.+?)_patch0*(\d+)_lev0*(\d+)(?:$|_)",
-        r"(.+?)_lev0*(\d+)_patch0*(\d+)(?:$|_)",
-    )
-    for pattern in patterns:
-        match = re.match(pattern, mesh_name)
-        if not match:
-            continue
-        label = match.group(1)
-        if "patch" in pattern.split("_")[1]:
-            patch_id = int(match.group(2))
-            level = int(match.group(3))
-        else:
-            level = int(match.group(2))
-            patch_id = int(match.group(3))
-        return label, level, patch_id
-    return None, None, None
-
-
 def _safe_name(path):
     name = os.path.basename(path.rstrip(os.sep))
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
@@ -79,8 +58,8 @@ def _find_variable_meshes(iteration, variable_filter=None):
     skipped = []
 
     for mesh_name in sorted(iteration.meshes):
-        label, level, patch_id = _parse_mesh_name(mesh_name)
-        if label is None:
+        mesh_info = opc.parse_amr_mesh_name(mesh_name)
+        if mesh_info is None:
             skipped.append(mesh_name)
             continue
 
@@ -90,14 +69,12 @@ def _find_variable_meshes(iteration, variable_filter=None):
             continue
 
         for comp in components:
-            comp_label = label if len(components) == 1 else f"{label}_{comp}"
-            if variable_filter:
-                haystack = f"{mesh_name} {comp_label} {comp}".lower()
-                if variable_filter not in haystack:
-                    continue
+            comp_label = opc.component_label(mesh_info, comp, len(components))
+            if not opc.mesh_matches_variable(mesh_name, comp, variable_filter, mesh_info):
+                continue
 
-            grouped.setdefault(comp_label, {}).setdefault(level, []).append(
-                (patch_id, mesh_name, mesh, comp)
+            grouped.setdefault(comp_label, {}).setdefault(mesh_info["level"], []).append(
+                (mesh_info["patch"], mesh_name, mesh, comp)
             )
 
     return grouped, skipped
@@ -323,7 +300,7 @@ def process_plane_file(filepath, args, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("data_dir", help="Directory containing .bp*/.h5 plane series")
+    parser.add_argument("data_path", help="Directory or one .bp*/.h5 plane series")
     parser.add_argument("--out-dir", default="planes_frames", help="Output directory")
     parser.add_argument("--variable", default=None, help="Variable substring to plot")
     parser.add_argument("--nxny", type=int, default=1024, help="Uniform canvas size")
@@ -332,6 +309,10 @@ def main():
     parser.add_argument("--vmin", type=float, default=None)
     parser.add_argument("--vmax", type=float, default=None)
     parser.add_argument("--cmap", default="plasma")
+    parser.add_argument("--tag", default=None, help="Exact plane tag, e.g. xy_z_pos0012p500")
+    parser.add_argument("--plane", choices=("xy", "xz", "yz"), default=None)
+    parser.add_argument("--normal-axis", choices=("x", "y", "z"), default=None)
+    parser.add_argument("--elevation", type=float, default=None)
     parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument("--no-movie", action="store_true")
@@ -340,14 +321,17 @@ def main():
 
     opc.setup_matplotlib_style()
 
-    data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
-    if not os.path.isdir(data_dir):
-        print(f"ERROR: not a directory: {data_dir}")
-        return 1
-
-    files = opc.gather_openpmd_series(data_dir)
+    data_path = os.path.abspath(os.path.expanduser(args.data_path))
+    files = opc.gather_openpmd_series(data_path)
+    files = opc.filter_series_by_plane(
+        files,
+        tag=args.tag,
+        plane=args.plane,
+        normal_axis=args.normal_axis,
+        elevation=args.elevation,
+    )
     if not files:
-        print(f"ERROR: no openPMD series found in {data_dir}")
+        print(f"ERROR: no matching openPMD plane series found in {data_path}")
         return 1
 
     os.makedirs(args.out_dir, exist_ok=True)

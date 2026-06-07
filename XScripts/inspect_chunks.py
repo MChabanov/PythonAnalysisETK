@@ -6,8 +6,8 @@ Shows the actual data structure without loading unwritten padding from declared 
 
 import sys
 import os
-import re
 import numpy as np
+import openpmd_common as opc
 
 
 def inspect_iteration(filepath, variable_pattern=""):
@@ -37,86 +37,86 @@ def inspect_iteration(filepath, variable_pattern=""):
     print(f"Iteration {it}")
     print(f"{'=' * 100}\n")
 
-    # Collect data by level
-    levels_data = {}
+    entries = {}
 
     for mesh_name in sorted(itobj.meshes):
-        if variable_pattern and variable_pattern.lower() not in mesh_name.lower():
+        mesh_info = opc.parse_amr_mesh_name(mesh_name)
+        if mesh_info is None:
             continue
-
-        # Extract level
-        m = re.search(r"_lev(\d+)", mesh_name)
-        if not m:
-            continue
-        level = int(m.group(1))
 
         mesh = itobj.meshes[mesh_name]
         comp_names = list(mesh)
         if not comp_names:
             continue
 
-        comp_name = comp_names[0]
-        rc = mesh[comp_name]
-
-        # Get metadata
-        sp = np.array(mesh.get_attribute("gridSpacing"))
-        off = np.array(mesh.get_attribute("gridGlobalOffset"))
-        pos = np.array(rc.position)
-        shape = np.array([int(s) for s in rc.shape])
-
-        declared_points = np.prod(shape)
-
-        # Iterate chunks
-        chunks_info = []
-        total_actual_points = 0
-
-        for ch in rc.available_chunks():
-            ch_off = np.array([int(v) for v in ch.offset])
-            ch_ext = np.array([int(v) for v in ch.extent])
-
-            # Clip cell-centred fill
-            ext_clipped = ch_ext.copy()
-            for d in range(len(ch_ext)):
-                if pos[d] != 0.0:
-                    valid = shape[d] - 1
-                    ext_clipped[d] = min(ch_ext[d], max(0, valid - ch_off[d]))
-
-            if ext_clipped[0] == 0 or ext_clipped[1] == 0:
+        for comp_name in comp_names:
+            if not opc.mesh_matches_variable(mesh_name, comp_name, variable_pattern, mesh_info):
                 continue
 
-            actual_points = np.prod(ext_clipped)
-            total_actual_points += actual_points
+            rc = mesh[comp_name]
 
-            # World coordinates
-            world_off = off + ch_off * sp
-            world_extent = ch_ext * sp
+            # Get metadata
+            sp = np.array(mesh.get_attribute("gridSpacing"))
+            off = np.array(mesh.get_attribute("gridGlobalOffset"))
+            pos = np.array(rc.position)
+            shape = np.array([int(s) for s in rc.shape])
 
-            chunks_info.append({
-                'offset': ch_off,
-                'extent': ch_ext,
-                'extent_clipped': ext_clipped,
-                'points': actual_points,
-                'world_offset': world_off,
-                'world_extent': world_extent,
-            })
+            declared_points = np.prod(shape)
 
-        if level not in levels_data:
-            levels_data[level] = {
+            # Iterate chunks
+            chunks_info = []
+            total_actual_points = 0
+
+            for ch in rc.available_chunks():
+                ch_off = np.array([int(v) for v in ch.offset])
+                ch_ext = np.array([int(v) for v in ch.extent])
+
+                # Clip cell-centred fill
+                ext_clipped = ch_ext.copy()
+                for d in range(len(ch_ext)):
+                    if pos[d] != 0.0:
+                        valid = shape[d] - 1
+                        ext_clipped[d] = min(ch_ext[d], max(0, valid - ch_off[d]))
+
+                if any(v == 0 for v in ext_clipped):
+                    continue
+
+                actual_points = np.prod(ext_clipped)
+                total_actual_points += actual_points
+
+                # World coordinates
+                world_off = off + ch_off * sp
+                world_extent = ch_ext * sp
+
+                chunks_info.append({
+                    'offset': ch_off,
+                    'extent': ch_ext,
+                    'extent_clipped': ext_clipped,
+                    'points': actual_points,
+                    'world_offset': world_off,
+                    'world_extent': world_extent,
+                })
+
+            label = opc.component_label(mesh_info, comp_name, len(comp_names))
+            entries[(label, mesh_info["level"], mesh_info["patch"])] = {
                 'mesh_name': mesh_name,
+                'component': comp_name,
                 'declared_points': declared_points,
                 'declared_shape': tuple(shape),
                 'chunks': chunks_info,
+                'mesh_info': mesh_info,
             }
 
     # Print results
-    if not levels_data:
+    if not entries:
         print(f"No data found matching '{variable_pattern}'")
         series.close()
         return
 
-    for level in sorted(levels_data.keys()):
-        info = levels_data[level]
+    for label, level, patch in sorted(entries):
+        info = entries[(label, level, patch)]
         mesh_name = info['mesh_name']
+        comp_name = info['component']
         declared = info['declared_points']
         declared_shape = info['declared_shape']
         chunks = info['chunks']
@@ -124,7 +124,7 @@ def inspect_iteration(filepath, variable_pattern=""):
         actual = sum(c['points'] for c in chunks)
         pct_sparse = 100 * (1 - actual / declared) if declared > 0 else 0
 
-        print(f"Level {level}: {mesh_name}")
+        print(f"{label} level {level} patch {patch}: {mesh_name}/{comp_name}")
         print(f"  Declared extent: {declared_shape} → {declared:,} points")
         print(f"  Actual written: {actual:,} points ({100*actual/declared:.2f}%)")
         print(f"  Sparsity: {pct_sparse:.1f}% unwritten")

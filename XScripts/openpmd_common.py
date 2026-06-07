@@ -6,6 +6,13 @@ import re
 import shutil
 import numpy as np
 
+OPENPMD_EXTENSIONS = ("bp5", "bp", "bp4", "h5")
+PLANE_TAG_RE = re.compile(
+    r"(?P<tag>(?P<plane>xy|xz|yz)_(?P<axis>[xyz])_"
+    r"(?P<sign>pos|neg)(?P<int_digits>\d{1,8})(?:p(?P<frac_digits>\d{0,8}))?)"
+)
+
+
 def setup_matplotlib_style(use_tex=None):
     """Configure matplotlib for publication-quality plots."""
     import matplotlib
@@ -30,16 +37,34 @@ def setup_matplotlib_style(use_tex=None):
     return plt
 
 
+def is_openpmd_series_path(path):
+    """Return True when path itself looks like an openPMD series file/directory."""
+    path = os.path.abspath(os.path.expanduser(path)).rstrip(os.sep)
+    basename = os.path.basename(path)
+    if ".md." in basename or basename.endswith(".dir"):
+        return False
+    if not (os.path.isfile(path) or os.path.isdir(path)):
+        return False
+    return any(basename.endswith(f".{ext}") for ext in OPENPMD_EXTENSIONS)
+
+
 def gather_openpmd_series(data_dir, pattern="*.bp*"):
-    """Find all openPMD series files/directories in a directory.
+    """Find openPMD series files/directories.
 
     Handles both:
     - Single files: simulation.it00000000.bp5
     - ADIOS2 parallel directories: simulation.it00000000.bp5/ (with data.0, data.1, ...)
+    - Direct input paths to one openPMD series
     """
     data_dir = os.path.abspath(os.path.expanduser(data_dir))
+    if is_openpmd_series_path(data_dir):
+        return [data_dir.rstrip(os.sep)]
+
+    if not os.path.isdir(data_dir):
+        return []
+
     files = []
-    for ext in ("bp5", "bp", "bp4", "h5"):
+    for ext in OPENPMD_EXTENSIONS:
         pattern_ext = os.path.join(data_dir, f"*.it*.{ext}")
         for f in glob.glob(pattern_ext):
             # Skip metadata and lock files
@@ -49,6 +74,130 @@ def gather_openpmd_series(data_dir, pattern="*.bp*"):
             if os.path.isfile(f) or os.path.isdir(f):
                 files.append(f)
     return sorted(files)
+
+
+def parse_plane_tag(text):
+    """Parse a PlanesX tag like xy_z_pos0012p500 from text.
+
+    The integer and fractional digit counts are intentionally variable because
+    they are controlled by planes_int_precision and planes_frac_precision.
+    """
+    match = PLANE_TAG_RE.search(os.path.basename(str(text)))
+    if not match:
+        match = PLANE_TAG_RE.search(str(text))
+    if not match:
+        return None
+
+    frac_digits = match.group("frac_digits") or ""
+    magnitude = float(int(match.group("int_digits")))
+    if frac_digits:
+        magnitude += int(frac_digits) / (10 ** len(frac_digits))
+    if match.group("sign") == "neg":
+        magnitude *= -1.0
+
+    return {
+        "tag": match.group("tag"),
+        "plane": match.group("plane"),
+        "normal_axis": match.group("axis"),
+        "sign": match.group("sign"),
+        "int_digits": match.group("int_digits"),
+        "frac_digits": frac_digits,
+        "elevation": magnitude,
+        "start": match.start("tag"),
+        "end": match.end("tag"),
+    }
+
+
+def parse_amr_mesh_name(mesh_name):
+    """Parse AMR mesh names with optional PlanesX prefix and centering suffix.
+
+    Examples:
+    - xy_z_pos0000p000_hydrobasex_rho_patch00_lev09
+    - xz_y_neg0003p000_hydrobasex_bvec_cv_patch00_lev02
+    - hydrobasex_rho_patch00_lev09
+    """
+    patterns = (
+        r"^(?P<prefix>.+)_patch0*(?P<patch>\d+)_lev0*(?P<level>\d+)$",
+        r"^(?P<prefix>.+)_lev0*(?P<level>\d+)_patch0*(?P<patch>\d+)$",
+    )
+    match = None
+    for pattern in patterns:
+        match = re.match(pattern, mesh_name)
+        if match:
+            break
+    if not match:
+        return None
+
+    prefix = match.group("prefix")
+    plane = parse_plane_tag(prefix)
+    group = prefix
+    if plane and plane["start"] == 0:
+        group = prefix[plane["end"]:]
+        if group.startswith("_"):
+            group = group[1:]
+
+    centering = None
+    for suffix in ("_cv", "_vc"):
+        if group.endswith(suffix):
+            centering = suffix[1:]
+            group = group[:-len(suffix)]
+            break
+
+    return {
+        "mesh_name": mesh_name,
+        "group": group,
+        "centering": centering,
+        "level": int(match.group("level")),
+        "patch": int(match.group("patch")),
+        "plane": plane,
+    }
+
+
+def component_label(mesh_info, component_name, component_count=1):
+    """Return the user-facing variable label for a mesh component."""
+    group = mesh_info["group"] if mesh_info else ""
+    comp = str(component_name)
+    if comp and comp.lower() not in {"scalar", "value", "0"}:
+        return comp
+    return group or comp
+
+
+def mesh_matches_variable(mesh_name, component_name, variable_pattern, mesh_info=None):
+    """Match a user variable substring against mesh, group, tag, and component."""
+    if not variable_pattern:
+        return True
+
+    needle = variable_pattern.lower()
+    fields = [mesh_name, component_name]
+    if mesh_info:
+        fields.append(mesh_info.get("group") or "")
+        plane = mesh_info.get("plane")
+        if plane:
+            fields.extend([plane["tag"], plane["plane"], plane["normal_axis"]])
+
+    return any(needle in str(field).lower() for field in fields)
+
+
+def filter_series_by_plane(files, tag=None, plane=None, normal_axis=None, elevation=None):
+    """Filter openPMD series paths by parsed PlanesX plane tag metadata."""
+    if not any(value is not None for value in (tag, plane, normal_axis, elevation)):
+        return files
+
+    out = []
+    for path in files:
+        info = parse_plane_tag(os.path.basename(path.rstrip(os.sep)))
+        if not info:
+            continue
+        if tag is not None and info["tag"] != tag:
+            continue
+        if plane is not None and info["plane"] != plane:
+            continue
+        if normal_axis is not None and info["normal_axis"] != normal_axis:
+            continue
+        if elevation is not None and not np.isclose(info["elevation"], elevation):
+            continue
+        out.append(path)
+    return out
 
 
 def parse_iteration_number(filepath):

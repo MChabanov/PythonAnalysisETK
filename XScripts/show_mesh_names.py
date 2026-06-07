@@ -3,6 +3,7 @@
 
 import sys
 import os
+import openpmd_common as opc
 
 def show_meshes(filepath):
     """Display all meshes and components in an openPMD file or directory.
@@ -58,6 +59,7 @@ def show_meshes(filepath):
         mesh = itobj.meshes[mesh_name]
         components = list(mesh)
         shape = mesh[components[0]].shape if components else "?"
+        mesh_info = opc.parse_amr_mesh_name(mesh_name)
 
         # Truncate long names
         display_name = mesh_name if len(mesh_name) < 70 else mesh_name[:67] + "..."
@@ -65,6 +67,20 @@ def show_meshes(filepath):
         print(f"       Components: {components}")
         if hasattr(mesh[components[0]], 'shape'):
             print(f"       Shape: {shape}")
+        if mesh_info:
+            plane = mesh_info["plane"]
+            plane_text = ""
+            if plane:
+                plane_text = (
+                    f", tag={plane['tag']}, plane={plane['plane']}, "
+                    f"normal={plane['normal_axis']}, elevation={plane['elevation']}"
+                )
+            centering = f", centering={mesh_info['centering']}" if mesh_info["centering"] else ""
+            print(
+                f"       Parsed: group={mesh_info['group']}, "
+                f"level={mesh_info['level']}, patch={mesh_info['patch']}"
+                f"{centering}{plane_text}"
+            )
         print()
 
     series.close()
@@ -73,34 +89,27 @@ def show_meshes(filepath):
     print("=" * 80)
     print("Analyzing naming patterns...\n")
 
-    import re
-    patterns = {
-        "_lev.*_patch": "Contains _lev and _patch (good for compositing)",
-        "gf[0-9]": "Grid function names (gf0, gf1, etc.)",
-        "_x$|_y$|_z$": "Component suffixes (x, y, z)",
-        "_[xy][z]$|_[yz]$": "Plane/slice designations",
-        "_lev": "Contains _lev (AMR level info)",
-    }
+    parsed = [opc.parse_amr_mesh_name(name) for name in meshes]
+    parsed = [info for info in parsed if info is not None]
+    print(f"Parseable AMR mesh names: {len(parsed)}/{len(meshes)}")
+    tags = sorted({info["plane"]["tag"] for info in parsed if info["plane"]})
+    if tags:
+        print("Plane tags:")
+        for tag in tags[:10]:
+            tag_info = opc.parse_plane_tag(tag)
+            print(
+                f"  - {tag}: plane={tag_info['plane']}, "
+                f"normal={tag_info['normal_axis']}, elevation={tag_info['elevation']}"
+            )
+        if len(tags) > 10:
+            print(f"  ... {len(tags) - 10} more")
 
-    found_patterns = {}
-    for pattern, desc in patterns.items():
-        matches = [m for m in meshes if re.search(pattern, m)]
-        if matches:
-            found_patterns[pattern] = (desc, len(matches))
-
-    if found_patterns:
-        print("Found patterns:")
-        for pattern, (desc, count) in sorted(found_patterns.items(), key=lambda x: -x[1][1]):
-            pct = 100 * count / len(meshes)
-            print(f"  {pct:5.1f}% ({count:3d}) {pattern:20s} - {desc}")
-    else:
-        print("No clear patterns found in mesh names.")
+    centerings = sorted({info["centering"] for info in parsed if info["centering"]})
+    if centerings:
+        print(f"Centering suffixes: {', '.join(centerings)}")
 
     print("\n" + "=" * 80)
-    print("TIP: If you see mostly unrecognized names:")
-    print("  - Mesh names might include vector components (e.g., rho_x, rho_y, rho_z)")
-    print("  - Mesh names might be flattened (e.g., rho_lev0_patch0_x_y_z)")
-    print("  - These should still be usable - you can group them in the script")
+    print("TIP: Use the component names above with --variable, e.g. hydrobasex_rho.")
     print("=" * 80)
 
     return True
