@@ -105,63 +105,101 @@ print(f"Found {len(target_meshes)} level(s): {sorted(target_meshes.keys())}\n")
 # Create uniform canvas and composite all levels
 print(f"Creating uniform {OUTPUT_RESOLUTION}×{OUTPUT_RESOLUTION} grid...")
 
-# First pass: determine extent from coarsest level
-with Timer("Determine extent"):
+# First pass: determine extent from actual chunks in coarsest level
+with Timer("Determine extent from chunks"):
     coarse_level = min(target_meshes.keys())
     _, coarse_mesh, coarse_comp = target_meshes[coarse_level]
     coarse_field = opc.OpenPMDField(coarse_mesh, coarse_comp)
-    x_coarse = coarse_field.get_axis_coords(0)
-    y_coarse = coarse_field.get_axis_coords(1)
-    print(f"  Coarse level extent: x=[{x_coarse.min():.6e}, {x_coarse.max():.6e}]")
-    print(f"                       y=[{y_coarse.min():.6e}, {y_coarse.max():.6e}]")
+
+    # Find actual extent from chunks (not declared extent)
+    ggo = coarse_field.offset   # grid global offset
+    gsp = coarse_field.spacing  # grid spacing
+    pos = coarse_field.position # cell position
+
+    x_min, x_max = np.inf, -np.inf
+    y_min, y_max = np.inf, -np.inf
+
+    for ch in coarse_field.record.available_chunks():
+        off = np.array([int(v) for v in ch.offset])
+        ext = np.array([int(v) for v in ch.extent])
+
+        # World coordinates for this chunk
+        y0 = ggo[0] + (off[0] + pos[0]) * gsp[0]
+        x0 = ggo[1] + (off[1] + pos[1]) * gsp[1]
+        y1 = y0 + ext[0] * gsp[0]
+        x1 = x0 + ext[1] * gsp[1]
+
+        x_min = min(x_min, x0)
+        x_max = max(x_max, x1)
+        y_min = min(y_min, y0)
+        y_max = max(y_max, y1)
+
+    if x_min == np.inf:
+        print("ERROR: No chunks found in coarse level")
+        sys.exit(1)
+
+    print(f"  Actual extent: x=[{x_min:.6e}, {x_max:.6e}]")
+    print(f"                 y=[{y_min:.6e}, {y_max:.6e}]")
 
 # Create uniform canvas
 canvas = np.full((OUTPUT_RESOLUTION, OUTPUT_RESOLUTION), np.nan, dtype=np.float64)
-grid_x = np.linspace(x_coarse.min(), x_coarse.max(), OUTPUT_RESOLUTION)
-grid_y = np.linspace(y_coarse.min(), y_coarse.max(), OUTPUT_RESOLUTION)
+grid_x = np.linspace(x_min, x_max, OUTPUT_RESOLUTION)
+grid_y = np.linspace(y_min, y_max, OUTPUT_RESOLUTION)
 
-# Composite levels coarse → fine with interpolation
-print("\nCompositing levels with linear interpolation...")
+# Composite levels coarse → fine with per-chunk interpolation
+print("\nCompositing levels with linear interpolation (per-chunk)...")
 
 with Timer("Composite all levels"):
     for level in sorted(target_meshes.keys()):
         with Timer(f"  Level {level}"):
             mesh_name, mesh, comp = target_meshes[level]
             field = opc.OpenPMDField(mesh, comp)
-            arr = field.read_full()
-            x = field.get_axis_coords(0)
-            y = field.get_axis_coords(1)
 
-            print(f"    Grid: {arr.shape}, Data range: [{np.nanmin(arr):.3e}, {np.nanmax(arr):.3e}]")
+            ggo = field.offset
+            gsp = field.spacing
+            pos = field.position
 
-            # Interpolate to uniform canvas using scipy
-            try:
-                from scipy.interpolate import RegularGridInterpolator
-                # Create interpolator
-                valid = np.where(np.isfinite(arr), arr, np.nan)
-                interp = RegularGridInterpolator((y, x), valid,
-                                               bounds_error=False, fill_value=np.nan)
-                # Evaluate on uniform grid
-                YY, XX = np.meshgrid(grid_y, grid_x, indexing="ij")
-                points = np.stack([YY, XX], axis=-1)
-                interpolated = interp(points)
+            chunk_count = 0
+            for data, off, ext in field.read_chunks(series):
+                chunk_count += 1
 
-                # Mask for valid data
-                valid_mask = np.isfinite(interpolated)
+                # World coordinates for this chunk
+                y0 = ggo[0] + (off[0] + pos[0]) * gsp[0]
+                x0 = ggo[1] + (off[1] + pos[1]) * gsp[1]
 
-                # Simple compositing: fine overwrites coarse
-                canvas[valid_mask] = interpolated[valid_mask]
+                # Build per-chunk coordinate arrays
+                y_chunk = y0 + np.arange(ext[0]) * gsp[0]
+                x_chunk = x0 + np.arange(ext[1]) * gsp[1]
 
-            except ImportError:
-                print("    WARNING: scipy not available, using nearest-neighbor")
-                # Fallback: nearest neighbor
-                jj = np.searchsorted(y, grid_y)
-                ii = np.searchsorted(x, grid_x)
-                jj = np.clip(jj, 0, len(y)-1)
-                ii = np.clip(ii, 0, len(x)-1)
-                sub = arr[np.ix_(jj, ii)]
-                valid_mask = np.isfinite(sub)
-                canvas[valid_mask] = sub[valid_mask]
+                # Interpolate chunk to uniform canvas using scipy
+                try:
+                    from scipy.interpolate import RegularGridInterpolator
+                    # Create interpolator for this chunk
+                    valid = np.where(np.isfinite(data), data, np.nan)
+                    interp = RegularGridInterpolator((y_chunk, x_chunk), valid,
+                                                   bounds_error=False, fill_value=np.nan)
+                    # Evaluate on uniform grid
+                    YY, XX = np.meshgrid(grid_y, grid_x, indexing="ij")
+                    points = np.stack([YY, XX], axis=-1)
+                    interpolated = interp(points)
+
+                    # Mask for valid data
+                    valid_mask = np.isfinite(interpolated)
+
+                    # Fine levels overwrite coarse
+                    canvas[valid_mask] = interpolated[valid_mask]
+
+                except ImportError:
+                    # Fallback: nearest neighbor per chunk
+                    jj = np.searchsorted(y_chunk, grid_y)
+                    ii = np.searchsorted(x_chunk, grid_x)
+                    jj = np.clip(jj, 0, len(y_chunk)-1)
+                    ii = np.clip(ii, 0, len(x_chunk)-1)
+                    sub = data[np.ix_(jj, ii)]
+                    valid_mask = np.isfinite(sub)
+                    canvas[valid_mask] = sub[valid_mask]
+
+            print(f"    Processed {chunk_count} chunk(s)")
 
 # Plot
 print("\nCreating visualization...")
