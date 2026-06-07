@@ -161,28 +161,28 @@ def _write_chunk_to_canvas(canvas, grid_y, grid_x, data, y_coords, x_coords, met
     canvas[j0:j1, i0:i1] = block
 
 
-def composite_variable(series, levels, nxny=1024, method="linear"):
+def composite_variable(series, levels, nxny=1024, method="linear", extent=None):
     """Composite one variable's AMR levels onto a uniform 2D canvas."""
     if not levels:
         raise ValueError("no levels to composite")
 
-    extent = None
-    for level in sorted(levels):
-        bounds = []
-        for _, _, mesh, comp in sorted(levels[level], key=lambda item: item[0]):
-            field = opc.OpenPMDField(mesh, comp)
-            field_bounds = _field_bounds_2d(field)
-            if field_bounds is not None:
-                bounds.append(field_bounds)
+    if extent is None:
+        for level in sorted(levels):
+            bounds = []
+            for _, _, mesh, comp in sorted(levels[level], key=lambda item: item[0]):
+                field = opc.OpenPMDField(mesh, comp)
+                field_bounds = _field_bounds_2d(field)
+                if field_bounds is not None:
+                    bounds.append(field_bounds)
 
-        if bounds:
-            extent = (
-                min(b[0] for b in bounds),
-                max(b[1] for b in bounds),
-                min(b[2] for b in bounds),
-                max(b[3] for b in bounds),
-            )
-            break
+            if bounds:
+                extent = (
+                    min(b[0] for b in bounds),
+                    max(b[1] for b in bounds),
+                    min(b[2] for b in bounds),
+                    max(b[3] for b in bounds),
+                )
+                break
 
     if extent is None:
         raise ValueError("no written 2D chunks found")
@@ -277,7 +277,11 @@ def process_plane_file(filepath, args, out_dir):
         for ax, label in zip(axes, labels):
             try:
                 canvas, grid_x, grid_y = composite_variable(
-                    series, grouped[label], nxny=args.nxny, method=args.method
+                    series,
+                    grouped[label],
+                    nxny=args.nxny,
+                    method=args.method,
+                    extent=args.extent,
                 )
             except Exception as exc:
                 print(f"  SKIP {label}: {exc}")
@@ -323,6 +327,10 @@ def main():
     parser.add_argument("--out-dir", default="planes_frames", help="Output directory")
     parser.add_argument("--variable", default=None, help="Variable substring to plot")
     parser.add_argument("--nxny", type=int, default=1024, help="Uniform canvas size")
+    parser.add_argument("--xmin", type=float, default=None, help="Plot extent minimum x")
+    parser.add_argument("--xmax", type=float, default=None, help="Plot extent maximum x")
+    parser.add_argument("--ymin", type=float, default=None, help="Plot extent minimum y")
+    parser.add_argument("--ymax", type=float, default=None, help="Plot extent maximum y")
     parser.add_argument("--method", choices=("linear", "nearest"), default="linear")
     parser.add_argument("--scale", choices=("log", "linear"), default="log")
     parser.add_argument("--vmin", type=float, default=None)
@@ -337,6 +345,18 @@ def main():
     parser.add_argument("--no-movie", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+
+    bounds = (args.xmin, args.xmax, args.ymin, args.ymax)
+    if any(value is not None for value in bounds):
+        if any(value is None for value in bounds):
+            print("ERROR: --xmin, --xmax, --ymin, and --ymax must be provided together")
+            return 1
+        if not (args.xmin < args.xmax and args.ymin < args.ymax):
+            print("ERROR: extent must satisfy xmin < xmax and ymin < ymax")
+            return 1
+        args.extent = bounds
+    else:
+        args.extent = None
 
     opc.setup_matplotlib_style()
 
