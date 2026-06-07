@@ -106,6 +106,7 @@ class OpenPMDField:
         # Get grid metadata
         self.spacing = np.array(mesh.get_attribute("gridSpacing"))
         self.offset = np.array(mesh.get_attribute("gridGlobalOffset"))
+        self.position = np.array(self.record.position)
         self.shape = np.array([int(s) for s in self.record.shape])
 
     def get_axis_coords(self, axis):
@@ -114,10 +115,54 @@ class OpenPMDField:
         n = self.shape[axis]
         return self.offset[axis] + (np.arange(n) + 0.5) * self.spacing[axis]
 
+    def read_chunks(self, series=None):
+        """Yield (data, offset, extent) for each written chunk (ADIOS2/HDF5 safe).
+
+        series: openpmd_api.Series instance (needed to flush reads).
+                Pass None if not available (data may be delayed).
+        """
+        for ch in self.record.available_chunks():
+            off = [int(v) for v in ch.offset]
+            ext = [int(v) for v in ch.extent]
+
+            # Clip cell-centred fill row/column: declared extent is vertex count N,
+            # but only N-1 cells were written. No-op for ADIOS2 box chunks,
+            # essential for HDF5 which reports whole extent as one chunk.
+            for d in range(len(ext)):
+                if self.position[d] != 0.0:  # cell-centred on this axis
+                    valid = self.shape[d] - 1
+                    ext[d] = min(ext[d], max(0, valid - off[d]))
+
+            if ext[0] == 0 or ext[1] == 0:
+                continue
+
+            data = self.record.load_chunk(off, ext)
+            if series is not None:
+                series.flush()
+            data = np.asarray(data).reshape(ext[0], ext[1])
+
+            yield data, off, ext
+
     def read_full(self):
-        """Load full 3D array (only use for manageable sizes)."""
-        self.record.load_chunk()
-        return np.asarray(self.record)
+        """Load full 3D array (only use for manageable sizes; uses chunks internally)."""
+        # Assemble chunks into a single array
+        chunks = list(self.read_chunks())
+        if not chunks:
+            return np.empty(tuple(self.shape), dtype=np.float64)
+
+        # Find bounding box of all chunks
+        all_offsets = np.array([off for _, off, _ in chunks])
+        all_extents = np.array([ext for _, _, ext in chunks])
+        min_off = all_offsets.min(axis=0)
+        max_pos = (all_offsets + all_extents).max(axis=0)
+        bounds = max_pos - min_off
+
+        result = np.full(tuple(bounds), np.nan, dtype=np.float64)
+        for data, off, ext in chunks:
+            i0, j0 = off[0] - min_off[0], off[1] - min_off[1]
+            result[i0:i0+ext[0], j0:j0+ext[1]] = data
+
+        return result
 
 
 class Canvas2D:

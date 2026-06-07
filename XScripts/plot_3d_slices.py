@@ -84,6 +84,10 @@ class SliceExtractor:
             return None, None
 
         field = opc.OpenPMDField(mesh, comp_name)
+
+        # For 3D, assemble chunks into full array. Per-chunk reading is less effective
+        # here since we need the full 3D array for slicing, but still safer than
+        # loading unwritten padding from sparse AMR domains.
         arr = field.read_full()  # Shape: (nz, ny, nx)
 
         # Find the slice index closest to slice_value along axis_idx

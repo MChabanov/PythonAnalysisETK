@@ -123,16 +123,46 @@ def read_plane_file(filepath):
             if level not in structured[var_name]:
                 structured[var_name][level] = {}
 
-            # Read all components
+            # Read all components per-chunk (handles sparse AMR correctly)
             for comp in mesh:
                 try:
                     field = opc.OpenPMDField(mesh, comp)
-                    arr = field.read_full()
-                    x = field.get_axis_coords(0)
-                    y = field.get_axis_coords(1)
-                    structured[var_name][level][patch_id] = (arr, x, y)
+                    ggo = field.offset    # [off_b, off_a] grid global offset
+                    gsp = field.spacing   # [sp_b, sp_a] grid spacing
+                    pos = field.position  # [pos_b, pos_a] cell position
+
+                    # Assemble all chunks into single array with world coordinates
+                    chunks = []
+                    for data, off, ext in field.read_chunks(series):
+                        # Compute world-coordinate edges for this chunk
+                        nb, na = ext[0], ext[1]
+                        y0 = ggo[0] + (off[0] + pos[0]) * gsp[0]
+                        x0 = ggo[1] + (off[1] + pos[1]) * gsp[1]
+                        y_edges = y0 + (np.arange(nb + 1) - 0.5) * gsp[0]
+                        x_edges = x0 + (np.arange(na + 1) - 0.5) * gsp[1]
+
+                        # Use cell-centre coordinates for compatibility with old code
+                        y_coords = y0 + np.arange(nb) * gsp[0]
+                        x_coords = x0 + np.arange(na) * gsp[1]
+
+                        chunks.append((data, x_coords, y_coords))
+
+                    if chunks:
+                        # Merge chunks (assume they tile properly)
+                        if len(chunks) == 1:
+                            arr, x, y = chunks[0]
+                        else:
+                            all_data = [c[0] for c in chunks]
+                            all_x = [c[1] for c in chunks]
+                            all_y = [c[2] for c in chunks]
+                            arr = np.concatenate(all_data, axis=1)
+                            x = np.concatenate(all_x, axis=0)
+                            y = np.concatenate(all_y, axis=0)
+
+                        structured[var_name][level][patch_id] = (arr, x, y)
                 except Exception as e:
-                    pass
+                    import traceback
+                    print(f"  WARNING: Error reading {mesh_name}/{comp}: {e}", file=sys.stderr)
 
         if unparseable:
             import sys
