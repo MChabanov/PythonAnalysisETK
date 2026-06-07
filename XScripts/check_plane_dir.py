@@ -78,28 +78,39 @@ def check_directory(data_dir):
         ]
 
         matched_names = set()
-        for mesh_name in meshes[:15]:
+        unmatched_names = []
+
+        for mesh_name in meshes:
             matched = False
             for fmt_name, pattern_str in patterns:
                 if re.search(pattern_str, mesh_name):
-                    print(f"  ✓ {mesh_name} ({fmt_name})")
                     matched_names.add(mesh_name)
                     matched = True
                     break
             if not matched:
-                print(f"  ⚠ {mesh_name} (unrecognized format)")
+                unmatched_names.append(mesh_name)
 
-        if len(meshes) > 15:
-            print(f"  ... and {len(meshes) - 15} more")
+        # Show sample of recognized
+        print("\n  Recognized meshes (first 5):")
+        for mesh_name in sorted(matched_names)[:5]:
+            print(f"    ✓ {mesh_name}")
 
-        if len(matched_names) == 0:
-            print("\n⚠ WARNING: No meshes match recognized patterns:")
-            print("  Expected patterns:")
-            print("    - <var>_lev<N>_patch<M>  (e.g., rho_lev0_patch0)")
-            print("    - <prefix>_<var>_patch<M>_lev<N>  (e.g., hydrobasex_rho_patch0_lev0)")
-            print("  If your meshes have different names, script may need updating")
-        else:
-            print(f"\n✓ {len(matched_names)}/{len(meshes)} meshes recognized")
+        # Show sample of unrecognized (THIS IS THE KEY INFO)
+        print(f"\n  ⚠ UNRECOGNIZED: {len(unmatched_names)}/{len(meshes)} meshes")
+        print("\n  Sample unrecognized mesh names (first 10):")
+        for mesh_name in unmatched_names[:10]:
+            print(f"    - {mesh_name}")
+
+        if len(unmatched_names) > 10:
+            print(f"    ... and {len(unmatched_names) - 10} more")
+
+        if len(matched_names) < len(meshes) * 0.5:
+            print("\n⚠ MAJOR ISSUE: Most meshes don't match expected naming patterns!")
+            print("\nYour mesh names don't follow standard PlanesX format.")
+            print("This is EXPECTED if you have component data.")
+            print("\nFix: Look at the sample names above and run:")
+            print(f"  python XScripts/show_mesh_names.py /path/to/file.bp5")
+            print("  to see ALL mesh names and understand the structure")
 
         series.close()
 
