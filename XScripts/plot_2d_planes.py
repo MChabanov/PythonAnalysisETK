@@ -40,6 +40,40 @@ def _erode(mask, n=1):
     return m
 
 
+def _parse_mesh_name(mesh_name):
+    """Extract (var_name, level, patch_id) from mesh name.
+
+    Handles multiple naming conventions:
+    - rho_lev0_patch0 (format 1)
+    - hydrobasex_rho_patch0_lev0 (format 2)
+    - gf100_lev0_patch0 (format 3)
+
+    Returns (var_name, level, patch_id) or (None, None, None) if not parseable.
+    """
+    # Try pattern 1: <var>_lev<L>_patch<P>
+    m = re.match(r"(.+?)_lev(\d+)_patch(\d+)", mesh_name)
+    if m:
+        return m.group(1), int(m.group(2)), int(m.group(3))
+
+    # Try pattern 2: <prefix>_<var>_patch<P>_lev<L>
+    m = re.match(r"(.+?)_patch(\d+)_lev(\d+)", mesh_name)
+    if m:
+        # Extract var from prefix_var format
+        prefix_var = m.group(1)
+        patch_id = int(m.group(2))
+        level = int(m.group(3))
+        return prefix_var, level, patch_id
+
+    # Try pattern 3: just return mesh name as var if it has level/patch info
+    m = re.search(r"lev(\d+).*patch(\d+)", mesh_name)
+    if m:
+        level = int(m.group(1))
+        patch_id = int(m.group(2))
+        return mesh_name, level, patch_id
+
+    return None, None, None
+
+
 def read_plane_file(filepath):
     """Read a single openPMD plane file with all levels/patches.
 
@@ -68,20 +102,17 @@ def read_plane_file(filepath):
     time_cu = opc.get_openpmd_time(series, it)
 
     # Organize data by variable, then level, then patch
-    # Format: mesh_name like "rho_lev0_patch0"
     structured = {}
-    pattern = re.compile(r"(.+?)_lev(\d+)_patch(\d+)")
+    unparseable = []
 
     try:
         for mesh_name in itobj.meshes:
             mesh = itobj.meshes[mesh_name]
-            m = pattern.match(mesh_name)
-            if not m:
-                continue  # Skip meshes that don't match pattern
+            var_name, level, patch_id = _parse_mesh_name(mesh_name)
 
-            var_name = m.group(1)
-            level = int(m.group(2))
-            patch_id = int(m.group(3))
+            if var_name is None:
+                unparseable.append(mesh_name)
+                continue
 
             if var_name not in structured:
                 structured[var_name] = {}
@@ -98,6 +129,12 @@ def read_plane_file(filepath):
                     structured[var_name][level][patch_id] = (arr, x, y)
                 except Exception as e:
                     pass
+
+        if unparseable:
+            import sys
+            print(f"  Warning: {len(unparseable)} mesh(es) not recognized:", file=sys.stderr)
+            for name in unparseable[:3]:
+                print(f"    - {name}", file=sys.stderr)
 
     except Exception as e:
         print(f"WARNING: Error reading meshes from {filepath}: {e}")

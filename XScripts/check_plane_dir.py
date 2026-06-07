@@ -70,25 +70,36 @@ def check_directory(data_dir):
 
         print(f"✓ Found {len(meshes)} mesh(es):")
 
-        pattern = re.compile(r"(.+?)_lev(\d+)_patch(\d+)")
-        valid_count = 0
-        for mesh_name in meshes[:10]:
-            m = pattern.match(mesh_name)
-            if m:
-                var = m.group(1)
-                level = m.group(2)
-                patch = m.group(3)
-                print(f"  ✓ {mesh_name}")
-                valid_count += 1
-            else:
-                print(f"  ⚠ {mesh_name} (doesn't match pattern)")
+        # Test multiple patterns
+        patterns = [
+            ("Format 1", r"(.+?)_lev(\d+)_patch(\d+)"),
+            ("Format 2", r"(.+?)_patch(\d+)_lev(\d+)"),
+            ("Format 3", r"(.+?)_lev\d+.*_patch\d+"),
+        ]
 
-        if len(meshes) > 10:
-            print(f"  ... and {len(meshes) - 10} more")
+        matched_names = set()
+        for mesh_name in meshes[:15]:
+            matched = False
+            for fmt_name, pattern_str in patterns:
+                if re.search(pattern_str, mesh_name):
+                    print(f"  ✓ {mesh_name} ({fmt_name})")
+                    matched_names.add(mesh_name)
+                    matched = True
+                    break
+            if not matched:
+                print(f"  ⚠ {mesh_name} (unrecognized format)")
 
-        if valid_count == 0:
-            print("\n⚠ WARNING: No meshes match expected pattern <var>_lev<N>_patch<M>")
-            print("  Script may still work, but compositing won't be available")
+        if len(meshes) > 15:
+            print(f"  ... and {len(meshes) - 15} more")
+
+        if len(matched_names) == 0:
+            print("\n⚠ WARNING: No meshes match recognized patterns:")
+            print("  Expected patterns:")
+            print("    - <var>_lev<N>_patch<M>  (e.g., rho_lev0_patch0)")
+            print("    - <prefix>_<var>_patch<M>_lev<N>  (e.g., hydrobasex_rho_patch0_lev0)")
+            print("  If your meshes have different names, script may need updating")
+        else:
+            print(f"\n✓ {len(matched_names)}/{len(meshes)} meshes recognized")
 
         series.close()
 
