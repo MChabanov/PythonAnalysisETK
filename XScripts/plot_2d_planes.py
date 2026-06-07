@@ -161,7 +161,7 @@ def _write_chunk_to_canvas(canvas, grid_y, grid_x, data, y_coords, x_coords, met
     canvas[j0:j1, i0:i1] = block
 
 
-def composite_variable(series, levels, nxny=1024, method="linear", extent=None):
+def composite_variable(series, levels, nx=1024, ny=1024, method="linear", extent=None):
     """Composite one variable's AMR levels onto a uniform 2D canvas."""
     if not levels:
         raise ValueError("no levels to composite")
@@ -188,9 +188,9 @@ def composite_variable(series, levels, nxny=1024, method="linear", extent=None):
         raise ValueError("no written 2D chunks found")
 
     x_min, x_max, y_min, y_max = extent
-    grid_x = np.linspace(x_min, x_max, nxny)
-    grid_y = np.linspace(y_min, y_max, nxny)
-    canvas = np.full((nxny, nxny), np.nan, dtype=np.float64)
+    grid_x = np.linspace(x_min, x_max, nx)
+    grid_y = np.linspace(y_min, y_max, ny)
+    canvas = np.full((ny, nx), np.nan, dtype=np.float64)
 
     for level in sorted(levels):
         entries = sorted(levels[level], key=lambda item: item[0])
@@ -279,7 +279,8 @@ def process_plane_file(filepath, args, out_dir):
                 canvas, grid_x, grid_y = composite_variable(
                     series,
                     grouped[label],
-                    nxny=args.nxny,
+                    nx=args.nx,
+                    ny=args.ny,
                     method=args.method,
                     extent=args.extent,
                 )
@@ -326,7 +327,9 @@ def main():
     parser.add_argument("data_path", help="Directory or one .bp*/.h5 plane series")
     parser.add_argument("--out-dir", default="planes_frames", help="Output directory")
     parser.add_argument("--variable", default=None, help="Variable substring to plot")
-    parser.add_argument("--nxny", type=int, default=1024, help="Uniform canvas size")
+    parser.add_argument("--nx", type=int, default=None, help="Canvas points in x")
+    parser.add_argument("--ny", type=int, default=None, help="Canvas points in y")
+    parser.add_argument("--nxny", type=int, default=1024, help="Set both --nx and --ny")
     parser.add_argument("--xmin", type=float, default=None, help="Plot extent minimum x")
     parser.add_argument("--xmax", type=float, default=None, help="Plot extent maximum x")
     parser.add_argument("--ymin", type=float, default=None, help="Plot extent minimum y")
@@ -357,6 +360,12 @@ def main():
         args.extent = bounds
     else:
         args.extent = None
+
+    args.nx = args.nx if args.nx is not None else args.nxny
+    args.ny = args.ny if args.ny is not None else args.nxny
+    if args.nx <= 1 or args.ny <= 1:
+        print("ERROR: --nx and --ny must both be greater than 1")
+        return 1
 
     opc.setup_matplotlib_style()
 

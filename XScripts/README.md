@@ -118,7 +118,7 @@ python XScripts/plot_2d_planes.py /path/to/planes \
   --plane xy \
   --xmin -500 --xmax 500 \
   --ymin -500 --ymax 500 \
-  --nxny 1024 \
+  --nx 1200 --ny 800 \
   --out-dir planes_frames \
   --no-movie
 ```
@@ -166,7 +166,9 @@ Useful options:
 --elevation 12.5     select by parsed plane elevation
 --xmin X --xmax X    physical x extent to plot
 --ymin Y --ymax Y    physical y extent to plot
---nxny N            output canvas size, default 1024
+--nx NX             output points in x
+--ny NY             output points in y
+--nxny N            set both --nx and --ny, default 1024
 --method linear     linear interpolation, falls back to nearest without scipy
 --method nearest    nearest-neighbor sampling
 --scale log         logarithmic color scale, default
