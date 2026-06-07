@@ -289,15 +289,16 @@ def process_plane_file(filepath, args, out_dir):
                 ax.set_visible(False)
                 continue
 
-            _, _, norm = _color_limits(canvas, args)
+            vmin, vmax, norm = _color_limits(canvas, args)
             extent = (grid_x.min(), grid_x.max(), grid_y.min(), grid_y.max())
+            imshow_kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
             im = ax.imshow(
                 canvas,
                 origin="lower",
                 extent=extent,
-                norm=norm,
                 cmap=opc.setup_colormap(args.cmap),
                 interpolation="none",
+                **imshow_kwargs,
             )
             ax.set_xlabel("x")
             ax.set_ylabel("y")

@@ -119,6 +119,8 @@ python XScripts/plot_2d_planes.py /path/to/planes \
   --xmin -500 --xmax 500 \
   --ymin -500 --ymax 500 \
   --nx 1200 --ny 800 \
+  --vmin 1e-8 --vmax 1e-3 \
+  --cmap plasma \
   --out-dir planes_frames \
   --no-movie
 ```
@@ -140,6 +142,8 @@ python XScripts/plot_3d_slices.py /path/to/3d_output \
   --axes xy \
   --slice-value 0.0 \
   --nxny 1024 \
+  --vmin 1e-8 --vmax 1e-3 \
+  --cmap plasma \
   --out-dir slices_frames \
   --no-movie
 ```
@@ -169,6 +173,9 @@ Useful options:
 --nx NX             output points in x
 --ny NY             output points in y
 --nxny N            set both --nx and --ny, default 1024
+--vmin V            color scale minimum
+--vmax V            color scale maximum
+--cmap NAME         matplotlib colormap name, default plasma
 --method linear     linear interpolation, falls back to nearest without scipy
 --method nearest    nearest-neighbor sampling
 --scale log         logarithmic color scale, default

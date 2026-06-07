@@ -153,22 +153,21 @@ def composite_slice(series, levels, axis_name, nxny, method, slice_value):
     return canvas.data, canvas.x, canvas.y
 
 
-def _color_norm(data, args):
+def _color_limits(data, args):
     finite = data[np.isfinite(data)]
     if args.scale == "log":
         finite = finite[finite > 0]
     if finite.size == 0:
-        return None
+        return None, None, None
 
     vmin = args.vmin if args.vmin is not None else np.nanpercentile(finite, 1)
     vmax = args.vmax if args.vmax is not None else np.nanpercentile(finite, 99)
     if not np.isfinite(vmin) or not np.isfinite(vmax):
-        return None
+        return None, None, None
     if vmin == vmax:
         vmax = vmin * 1.01 if vmin else 1.0
-    if args.scale == "log" and vmin > 0:
-        return LogNorm(vmin=vmin, vmax=vmax)
-    return None
+    norm = LogNorm(vmin=vmin, vmax=vmax) if args.scale == "log" and vmin > 0 else None
+    return vmin, vmax, norm
 
 
 def process_file(filepath, args, out_dir):
@@ -223,13 +222,15 @@ def process_file(filepath, args, out_dir):
 
                 fig, ax = plt.subplots(figsize=(7.5, 6.5), constrained_layout=True)
                 extent = (fast.min(), fast.max(), slow.min(), slow.max())
+                vmin, vmax, norm = _color_limits(data, args)
+                imshow_kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
                 im = ax.imshow(
                     data,
                     origin="lower",
                     extent=extent,
-                    norm=_color_norm(data, args),
                     cmap=opc.setup_colormap(args.cmap),
                     interpolation="none",
+                    **imshow_kwargs,
                 )
                 ax.set_xlabel(AXES[axis_name]["xlabel"])
                 ax.set_ylabel(AXES[axis_name]["ylabel"])
