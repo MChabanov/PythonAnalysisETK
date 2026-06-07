@@ -1,299 +1,160 @@
-# CarpetX 2D/3D Visualization Scripts
+# CarpetX / PlanesX openPMD Visualization Scripts
 
-Simple, publication-quality visualization tools for EinsteinToolkit CarpetX openPMD output (2D planes and 3D slices).
+Utilities for inspecting and plotting CarpetX/PlanesX openPMD output. The main
+focus is sparse AMR data written as BP5/HDF5, where the declared mesh extent can
+be much larger than the data that was actually written.
 
-## Quick Start
+## Core Rule
 
-### Dependencies
+Do not load the full declared extent of a sparse AMR mesh unless you have already
+verified it is small and dense.
+
+For PlanesX/openPMD output, a mesh can declare the full refined domain while only
+writing the AMR boxes that intersect the plane. Reading the full extent can pull
+unwritten padding and produce garbage values. The safe pattern is:
+
+1. Iterate `available_chunks()`.
+2. Clip cell-centered fill rows/columns when needed.
+3. Read each written chunk with `load_chunk(offset, extent)`.
+4. Composite chunks coarse-to-fine on a plotting canvas.
+
+This is the behavior used by the current plotters and diagnostics.
+
+## ADIOS2 BP5 Directories
+
+BP5 output may appear as a directory ending in `.bp5`, not as a single regular
+file. This is normal for ADIOS2 parallel output. Pass the `.bp5` directory path
+directly to `openpmd_api` or to these scripts; `openpmd_api` handles the metadata
+and `data.*` files internally.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `plot_2d_planes.py` | Main PlanesX 2D plotter. Reads written chunks, resamples to a uniform canvas, and composites AMR levels coarse-to-fine. |
+| `plot_3d_slices.py` | 3D CarpetX slice plotter. Loads one-cell-thick slabs from chunks that intersect the requested slice. |
+| `openpmd_common.py` | Shared openPMD, plotting, chunk-reading, colormap, and movie helpers. |
+| `quick_diagnose.py` | Fast directory scan with optional metadata-only mesh inspection. |
+| `inspect_chunks.py` | Shows declared extent vs actual written chunks for one series/variable. |
+| `show_mesh_names.py` | Lists mesh names, components, shapes, and naming patterns. |
+| `plot_openpmd_plane.py` | Minimal chunk-safe reference plotter, kept temporarily while the main plotter settles. |
+| `test_single_plot_v2.py` | Known successful hard-coded reference used to guide the main 2D plotter. |
+
+## Dependencies
+
+Required:
 
 ```bash
-# Required
-pip install openpmd-api numpy matplotlib
+pip install openPMD-api numpy matplotlib
+```
 
-# Optional but recommended
+Recommended:
+
+```bash
 pip install scipy imageio imageio-ffmpeg
 ```
 
-### 2D Plane Visualization
+`scipy` enables linear interpolation. Without it, the plotters fall back to
+nearest-neighbor sampling. `imageio` and ffmpeg are only needed for movies.
 
-For **PlanesX output** (pre-extracted 2D planes):
+## Typical Workflow
+
+Start with a quick scan:
 
 ```bash
-python plot_2d_planes.py /path/to/planes/ --out-dir frames_2d --fps 12
+python XScripts/quick_diagnose.py /path/to/output --inspect
 ```
 
-### 3D Slice Visualization
-
-For **full 3D CarpetX data** (extract slices on-the-fly):
+Inspect mesh names if variable matching is unclear:
 
 ```bash
-python plot_3d_slices.py /path/to/3d_data/ --axes xy,xz,yz --out-dir frames_3d
+python XScripts/show_mesh_names.py /path/to/output/file.it00000000.bp5
 ```
 
----
-
-## Files in This Directory
-
-| File | Purpose |
-|------|---------|
-| `openpmd_common.py` | Shared utilities for I/O, matplotlib styling, canvas compositing |
-| `plot_2d_planes.py` | Main script for visualizing PlanesX 2D plane output |
-| `plot_3d_slices.py` | Main script for visualizing CarpetX 3D data with slice extraction |
-| `TOOLS_COMPARISON.md` | Detailed analysis of tool applicability across 2D and 3D |
-| `PROGRESS.md` | Initial analysis and implementation plan |
-| `README.md` | This file |
-
----
-
-## Script Usage
-
-### `plot_2d_planes.py`
-
-Extract and visualize 2D plane data from openPMD files.
+Inspect actual chunks for a variable:
 
 ```bash
-usage: plot_2d_planes.py [-h] [--out-dir DIR] [--fps N] [--nxny N]
-                         [--vmin V] [--vmax V] [--cmap CMAP] [--variable VAR]
-                         [--no-movie]
-                         data_dir
+python XScripts/inspect_chunks.py /path/to/output/file.it00000000.bp5 hydrobasex_rho
 ```
 
-**Arguments:**
-- `data_dir`: Directory containing plane .bp5/.h5 files
-- `--out-dir DIR`: Output directory for frames (default: `planes_frames`)
-- `--fps N`: Movie frame rate (default: 12)
-- `--nxny N`: Resample to N×N grid (default: native resolution)
-- `--vmin V`, `--vmax V`: Color scale bounds (auto-detected if not set)
-- `--cmap CMAP`: Colormap name, e.g., "plasma", "viridis" (default: "plasma")
-- `--variable VAR`: Filter to variables matching this substring
-- `--no-movie`: Skip movie assembly (keep frames only)
-
-**Example:**
+Plot 2D PlanesX output:
 
 ```bash
-python plot_2d_planes.py ../CarpetX/TestPlanesX/output/ \
-  --out-dir test_planes \
-  --cmap plasma \
-  --vmin 1e-10 --vmax 1e3 \
-  --fps 10
-```
-
-### `plot_3d_slices.py`
-
-Extract 2D slices from 3D CarpetX openPMD data and composite AMR levels.
-
-```bash
-usage: plot_3d_slices.py [-h] [--axes AXES] [--out-dir DIR] [--nxny N]
-                         [--vmin V] [--vmax V] [--cmap CMAP] [--fps N]
-                         [--interpolate] [--no-movie]
-                         data_dir
-```
-
-**Arguments:**
-- `data_dir`: Directory containing 3D .bp5/.h5 files
-- `--axes AXES`: Comma-separated slice planes (default: "xy,xz,yz")
-  - `xy`: slice along z-axis (bird's eye view)
-  - `xz`: slice along y-axis (side view)
-  - `yz`: slice along x-axis (front view)
-- `--out-dir DIR`: Output directory for frames (default: `slices_frames`)
-- `--nxny N`: Canvas resolution per axis (default: 1024)
-- `--vmin V`, `--vmax V`: Color scale bounds
-- `--cmap CMAP`: Colormap name (default: "plasma")
-- `--fps N`: Movie frame rate (default: 12)
-- `--interpolate`: Use scipy RegularGridInterpolator (higher quality, slower)
-- `--no-movie`: Skip movie assembly
-
-**Example:**
-
-```bash
-python plot_3d_slices.py ../data/BNS_IG_fixedGrid/ \
-  --axes xy,xz \
+python XScripts/plot_2d_planes.py /path/to/planes \
+  --variable hydrobasex_rho \
   --nxny 1024 \
-  --interpolate \
-  --out-dir bns_slices
+  --out-dir planes_frames \
+  --no-movie
 ```
 
----
-
-## OpenPMD Common Library
-
-`openpmd_common.py` provides reusable utilities:
-
-### Key Functions
-
-```python
-# Matplotlib setup
-plt = openpmd_common.setup_matplotlib_style(use_tex=None)
-
-# File discovery
-files = openpmd_common.gather_openpmd_series(data_dir)
-
-# Metadata extraction
-iteration = openpmd_common.parse_iteration_number(filepath)
-time_cu = openpmd_common.get_openpmd_time(series, iteration)
-
-# Colormap setup
-cmap = openpmd_common.setup_colormap("plasma", vmin=1e-10, vmax=1e3)
-
-# Movie assembly
-openpmd_common.movie_from_frames(frame_list, "output.mp4", fps=12)
-```
-
-### Key Classes
-
-**`OpenPMDField`**: Wrapper around openPMD mesh component
-```python
-field = OpenPMDField(mesh, component_name)
-x_coords = field.get_axis_coords(0)  # 1D array
-full_array = field.read_full()       # Load all data
-```
-
-**`Canvas2D`**: Uniform 2D canvas for compositing
-```python
-canvas = Canvas2D(extent_xy=(xmin, xmax, ymin, ymax), nxny=1024)
-canvas.add_patch(data_2d, x_coords, y_coords, method="nearest")
-```
-
----
-
-## Output Structure
-
-Both scripts produce:
-
-```
-<out_dir>/
-├── frame_*.png or slice_*.png    # Individual frame images (150 dpi, ~1-2 MB each)
-├── <name>.mp4                    # Assembled movie (h.264, ~10-50 MB)
-└── <name>.gif                    # Fallback if ffmpeg unavailable (~100-500 MB)
-```
-
-Movie frame rate: 12 fps by default (use `--fps` to change).
-
----
-
-## Visualization Options
-
-### Colormaps
-
-Common choices (use with `--cmap`):
-- `plasma` (default) – perceptually uniform, good for astrophysics
-- `viridis` – colorblind-friendly
-- `inferno` – high contrast
-- `hot` – thermal-like
-- `Greys` – monochrome
-
-See [matplotlib colormaps](https://matplotlib.org/stable/tutorials/colors/colormaps.html).
-
-### Normalization
-
-By default, 1st and 99th percentiles are used for vmin/vmax. Override with:
-```bash
---vmin 1e-10 --vmax 1e-3    # Log scale (automatic via LogNorm)
-```
-
----
-
-## Performance Notes
-
-### 2D Planes
-- Speed: ~1–2 sec per plane file
-- Memory: Minimal (2D slabs only)
-- Scaling: Linear with number of files
-
-### 3D Slices
-- Speed: ~5–10 sec per iteration (depends on nxny, AMR depth)
-- Memory: O(nxny²) per axis (e.g., 1024² ≈ 4 GB per axis)
-- Scaling: Quadratic with nxny; linear with number of iterations
-
-**Tips for large data:**
-- Reduce `--nxny` (e.g., 512 instead of 1024)
-- Select only axes of interest (e.g., `--axes xy`)
-- Use `--no-movie` if only frames needed
-
----
-
-## Troubleshooting
-
-### "openpmd_api not available"
-```bash
-pip install openPMD-api
-```
-
-### "No openPMD files found"
-- Check data directory path (must contain .bp5, .bp, .bp4, or .h5 files)
-- Ensure files are not in subdirectories (adjust if needed)
-
-### "scipy not available" (for 3D with `--interpolate`)
-```bash
-pip install scipy
-```
-
-Falls back to nearest-neighbor without scipy, but with lower quality.
-
-### Memory exhausted on large 3D files
-- Reduce resolution: `--nxny 512`
-- Process subsets of axes: `--axes xy` only
-- Check if data can be pre-sliced with PlanesX instead
-
-### Movie assembly fails
-Ensure ffmpeg is available:
-```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# macOS
-brew install ffmpeg
-
-# Or via pip
-pip install imageio-ffmpeg
-```
-
-Fallback: Script creates GIF instead if MP4 fails.
-
----
-
-## Tool Applicability: 2D vs 3D
-
-See **`TOOLS_COMPARISON.md`** for detailed analysis of:
-- Which components are shared vs unique
-- When to use each script
-- Performance/scalability trade-offs
-- Known limitations and workarounds
-
-**TL;DR**: ~70% of I/O and visualization code is shared; data extraction differs by dimension.
-
----
-
-## Testing with Example Data
-
-If you have CarpetX test simulations available:
+Plot a 3D slice:
 
 ```bash
-# Test 2D planes
-python plot_2d_planes.py ../CarpetX/TestPlanesX/test/ \
-  --out-dir test_2d --fps 4 --no-movie
-
-# Test 3D (if available)
-python plot_3d_slices.py /path/to/3d/output/ \
-  --axes xy --nxny 256 --no-movie  # Low res for quick test
+python XScripts/plot_3d_slices.py /path/to/3d_output \
+  --variable hydrobasex_rho \
+  --axes xy \
+  --slice-value 0.0 \
+  --nxny 1024 \
+  --out-dir slices_frames \
+  --no-movie
 ```
 
----
+## 2D Plotter Notes
 
-## Development Notes
+`plot_2d_planes.py` is the production version of the successful
+`test_single_plot_v2.py` workflow:
 
-- **Architecture**: Split script I/O into a reusable library (`openpmd_common.py`)
-- **Error handling**: Graceful degradation (skip bad files/axes, fall back from scipy)
-- **Extensibility**: Easy to add new scripts (slicing methods, new file formats, etc.)
+- extent comes from actual written chunks on the coarsest available level;
+- each chunk is mapped into world coordinates;
+- chunks are interpolated or sampled onto a fixed `--nxny` by `--nxny` canvas;
+- finer AMR levels overwrite coarser levels;
+- output filenames include the input series basename to avoid collisions between
+  planes at the same iteration.
 
-See `PROGRESS.md` for initial analysis and design decisions.
+Useful options:
 
----
+```bash
+--variable TEXT      variable/mesh/component substring to plot
+--nxny N            output canvas size, default 1024
+--method linear     linear interpolation, falls back to nearest without scipy
+--method nearest    nearest-neighbor sampling
+--scale log         logarithmic color scale, default
+--scale linear      linear color scale
+--no-movie          write PNG frames only
+```
 
-## License
+## 3D Plotter Notes
 
-Same as parent project.
+`plot_3d_slices.py` is intended for full 3D CarpetX output. It assumes record
+axis order `(z, y, x)`, which matches the existing CarpetX plotting conventions
+used here.
 
-## Contact
+Unlike the old version, it does not assemble a full 3D array. For each requested
+slice it:
 
-For issues or improvements, contact the project maintainers.
+- finds chunks that intersect `--slice-value`;
+- reads only a one-cell-thick slab from each intersecting chunk;
+- composites levels coarse-to-fine on a uniform canvas.
+
+Use `--axes xy,xz,yz` to select slice planes. If more than one variable matches
+and `--all-variables` is not passed, the script plots the first matching label
+and reports that choice.
+
+## Diagnostics
+
+`quick_diagnose.py` is the first-pass tool. With `--inspect`, it opens one 2D
+and/or 3D sample and reports mesh count, parseable AMR names, components, and
+shapes without loading field data.
+
+`inspect_chunks.py` is the most important data-safety diagnostic. It reports how
+much of each declared mesh is actually written. Use it when plots look wrong or
+when a file appears enormous.
+
+`show_mesh_names.py` is useful when `--variable` does not match what you expect.
+
+## Notes on `read_full()`
+
+`openpmd_common.OpenPMDField.read_full()` exists only as a convenience for cases
+where the written chunk bounding box is known to be manageable. It still may
+allocate a large dense array. Prefer `read_chunks()` or script-specific
+chunk/slab iteration for production plotting.

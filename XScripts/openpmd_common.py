@@ -95,7 +95,7 @@ def setup_colormap(cmap_name="plasma", vmin=None, vmax=None):
 
 
 class OpenPMDField:
-    """Helper to access 3D field data from openPMD with coordinate info."""
+    """Helper to access openPMD field data with coordinate metadata."""
 
     def __init__(self, mesh, component_name):
         """Initialize with a mesh and component name."""
@@ -110,17 +110,12 @@ class OpenPMDField:
         self.shape = np.array([int(s) for s in self.record.shape])
 
     def get_axis_coords(self, axis):
-        """Get 1D coordinate array for given axis (0=x, 1=y, 2=z)."""
-        # Note: spacing/offset may be in (z,y,x) order; adjust if needed
+        """Get 1D coordinate array for a record axis."""
         n = self.shape[axis]
-        return self.offset[axis] + (np.arange(n) + 0.5) * self.spacing[axis]
+        return self.offset[axis] + (np.arange(n) + self.position[axis]) * self.spacing[axis]
 
-    def read_chunks(self, series=None):
-        """Yield (data, offset, extent) for each written chunk (ADIOS2/HDF5 safe).
-
-        series: openpmd_api.Series instance (needed to flush reads).
-                Pass None if not available (data may be delayed).
-        """
+    def iter_chunk_extents(self):
+        """Yield clipped written chunk (offset, extent) pairs without loading data."""
         for ch in self.record.available_chunks():
             off = [int(v) for v in ch.offset]
             ext = [int(v) for v in ch.extent]
@@ -133,22 +128,35 @@ class OpenPMDField:
                     valid = self.shape[d] - 1
                     ext[d] = min(ext[d], max(0, valid - off[d]))
 
-            if ext[0] == 0 or ext[1] == 0:
+            if any(e <= 0 for e in ext):
                 continue
 
+            yield off, ext
+
+    def read_chunks(self, series=None):
+        """Yield (data, offset, extent) for each written chunk (ADIOS2/HDF5 safe).
+
+        series: openpmd_api.Series instance (needed to flush reads).
+                Pass None if not available (data may be delayed).
+        """
+        for off, ext in self.iter_chunk_extents():
             data = self.record.load_chunk(off, ext)
             if series is not None:
                 series.flush()
-            data = np.asarray(data).reshape(ext[0], ext[1])
+            data = np.asarray(data).reshape(tuple(ext))
 
             yield data, off, ext
 
-    def read_full(self):
-        """Load full 3D array (only use for manageable sizes; uses chunks internally)."""
-        # Assemble chunks into a single array
-        chunks = list(self.read_chunks())
+    def read_full(self, series=None):
+        """Assemble the written chunk bounding box into one array.
+
+        Warning: this is still unsafe for large sparse AMR data if the written
+        bounding box is huge. Prefer iterating with read_chunks() whenever a
+        plot or diagnostic can operate patch-by-patch.
+        """
+        chunks = list(self.read_chunks(series))
         if not chunks:
-            return np.empty(tuple(self.shape), dtype=np.float64)
+            return np.empty(tuple(0 for _ in self.shape), dtype=np.float64)
 
         # Find bounding box of all chunks
         all_offsets = np.array([off for _, off, _ in chunks])
@@ -159,8 +167,11 @@ class OpenPMDField:
 
         result = np.full(tuple(bounds), np.nan, dtype=np.float64)
         for data, off, ext in chunks:
-            i0, j0 = off[0] - min_off[0], off[1] - min_off[1]
-            result[i0:i0+ext[0], j0:j0+ext[1]] = data
+            slices = tuple(
+                slice(off[d] - min_off[d], off[d] - min_off[d] + ext[d])
+                for d in range(len(ext))
+            )
+            result[slices] = data
 
         return result
 
@@ -198,11 +209,11 @@ class Canvas2D:
         if method == "linear":
             try:
                 from scipy.interpolate import RegularGridInterpolator
-                valid = np.where(data_2d > 0, data_2d, np.nan)
+                valid = np.where(np.isfinite(data_2d), data_2d, np.nan)
                 f = RegularGridInterpolator((y_coords, x_coords), valid,
                                            bounds_error=False, fill_value=np.nan)
-                YY, XX = np.meshgrid(sub_x, sub_y, indexing="ij")
-                interp_data = f(np.stack([XX, YY], axis=-1))
+                YY, XX = np.meshgrid(sub_y, sub_x, indexing="ij")
+                interp_data = f(np.stack([YY, XX], axis=-1))
             except ImportError:
                 method = "nearest"
 
@@ -213,7 +224,9 @@ class Canvas2D:
 
         # Write to canvas (skip NaN values)
         valid_mask = np.isfinite(interp_data)
-        self.data[j0:j1, i0:i1][valid_mask] = interp_data[valid_mask]
+        block = self.data[j0:j1, i0:i1]
+        block[valid_mask] = interp_data[valid_mask]
+        self.data[j0:j1, i0:i1] = block
 
 
 def movie_from_frames(frame_list, output_path, fps=12):

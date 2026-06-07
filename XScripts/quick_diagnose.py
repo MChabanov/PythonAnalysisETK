@@ -1,124 +1,153 @@
 #!/usr/bin/env python3
-"""Quick diagnostic: directly scan a single directory for openPMD files."""
+"""Quick metadata diagnostic for openPMD plane/volume directories."""
 
-import sys
+import argparse
 import os
-import glob
 import re
+import sys
 from collections import defaultdict
 
+import openpmd_common as opc
 
-def quick_diagnose(data_dir):
-    """Fast scan of a single directory."""
+
+def classify_series(path):
+    basename = os.path.basename(path.rstrip(os.sep)).lower()
+    if re.search(r"\.(xy|xz|yz)_", basename):
+        return "2D"
+    if re.search(r"(xy|xz|yz).*_(x|y|z)_?pos", basename):
+        return "2D"
+    if "_pos" in basename or "planes" in basename:
+        return "2D"
+    return "3D"
+
+
+def parse_mesh_name(mesh_name):
+    patterns = (
+        r"(.+?)_patch0*(\d+)_lev0*(\d+)(?:$|_)",
+        r"(.+?)_lev0*(\d+)_patch0*(\d+)(?:$|_)",
+    )
+    return any(re.match(pattern, mesh_name) for pattern in patterns)
+
+
+def inspect_series_metadata(path, limit=8):
+    try:
+        import openpmd_api as io
+    except ImportError:
+        return {"ok": False, "error": "openpmd_api not available"}
+
+    try:
+        series = io.Series(path, io.Access.read_only)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    try:
+        iterations = list(series.iterations)
+        if not iterations:
+            return {"ok": False, "error": "no iterations found"}
+
+        it = iterations[0]
+        meshes = list(series.iterations[it].meshes)
+        recognized = [name for name in meshes if parse_mesh_name(name)]
+        unrecognized = [name for name in meshes if name not in recognized]
+
+        samples = []
+        for mesh_name in meshes[:limit]:
+            mesh = series.iterations[it].meshes[mesh_name]
+            comps = list(mesh)
+            shape = tuple(mesh[comps[0]].shape) if comps else ()
+            samples.append((mesh_name, comps, shape))
+
+        return {
+            "ok": True,
+            "iteration": it,
+            "mesh_count": len(meshes),
+            "recognized_count": len(recognized),
+            "unrecognized": unrecognized[:limit],
+            "samples": samples,
+        }
+    finally:
+        series.close()
+
+
+def print_metadata_report(path):
+    print(f"\nInspecting sample: {os.path.basename(path.rstrip(os.sep))}")
+    result = inspect_series_metadata(path)
+    if not result["ok"]:
+        print(f"  metadata unavailable: {result['error']}")
+        return
+
+    total = result["mesh_count"]
+    recognized = result["recognized_count"]
+    pct = 100 * recognized / total if total else 0
+    print(f"  iteration: {result['iteration']}")
+    print(f"  meshes: {total}")
+    print(f"  parseable AMR names: {recognized}/{total} ({pct:.0f}%)")
+
+    print("  sample meshes:")
+    for mesh_name, comps, shape in result["samples"]:
+        print(f"    - {mesh_name}")
+        print(f"      components={comps}, shape={shape}")
+
+    if result["unrecognized"]:
+        print("  sample unrecognized names:")
+        for name in result["unrecognized"]:
+            print(f"    - {name}")
+
+
+def quick_diagnose(data_dir, inspect=False):
     data_dir = os.path.abspath(os.path.expanduser(data_dir))
-
     if not os.path.isdir(data_dir):
-        print(f"ERROR: Not a directory: {data_dir}")
+        print(f"ERROR: not a directory: {data_dir}")
         return 1
 
-    print(f"Quick Diagnostic: {data_dir}\n")
-
-    # Find openPMD files (both files and ADIOS2 directories)
-    bp_files = []
-
-    for pattern in ["*.bp5", "*.bp4", "*.bp", "*.h5"]:
-        for path in glob.glob(os.path.join(data_dir, pattern)):
-            # Skip metadata and lock files
-            if ".md." in os.path.basename(path) or path.endswith(".dir"):
-                continue
-
-            # Accept both regular files and directories (ADIOS2 parallel mode)
-            if os.path.isfile(path) or os.path.isdir(path):
-                bp_files.append(path)
-
-    bp_files = sorted(bp_files)
-
-    if not bp_files:
-        print(f"✗ No openPMD files found directly in {data_dir}")
-        print("\nLooking for any .bp* or .h5 files...")
-        all_files = os.listdir(data_dir)
-        bp_like = [f for f in all_files if '.bp' in f.lower() or '.h5' in f.lower()]
-        if bp_like:
-            print(f"Found {len(bp_like)} .bp*/.h5-like files:")
-            for f in sorted(bp_like)[:10]:
-                print(f"  - {f}")
-            if len(bp_like) > 10:
-                print(f"  ... and {len(bp_like) - 10} more")
+    files = opc.gather_openpmd_series(data_dir)
+    if not files:
+        print(f"ERROR: no openPMD series found in {data_dir}")
+        print("Expected names like *.it00000000.bp5, *.it00000000.bp4, or *.it00000000.h5")
         return 1
 
-    print(f"Found {len(bp_files)} openPMD files\n")
+    by_kind = defaultdict(list)
+    for path in files:
+        by_kind[classify_series(path)].append(path)
 
-    # Classify by type
-    by_type = defaultdict(list)
-    for f in bp_files:
-        basename = os.path.basename(f)
-        if re.search(r"(xy|xz|yz).*_z|_y|_x.*pos", basename) or \
-           re.search(r"\.(xy|xz|yz)_", basename) or \
-           "planes" in basename.lower() or \
-           re.search(r"_pos\d+", basename):
-            by_type["2D"].append(f)
-        else:
-            by_type["3D"].append(f)
+    print(f"Directory: {data_dir}")
+    print(f"Series found: {len(files)}")
 
-    print("=" * 80)
-    if by_type["2D"]:
-        print(f"2D PLANE FILES ({len(by_type['2D'])})")
-        print("-" * 80)
-        # Group by plane type
-        planes = defaultdict(list)
-        for f in by_type["2D"]:
-            basename = os.path.basename(f)
-            # Extract plane type (xy, xz, yz)
-            m = re.search(r"\.(xy|xz|yz)_", basename)
-            plane = m.group(1) if m else "unknown"
-            planes[plane].append(basename)
+    for kind in ("2D", "3D"):
+        paths = by_kind[kind]
+        if not paths:
+            continue
+        print(f"\n{kind} candidates: {len(paths)}")
+        for path in paths[:8]:
+            print(f"  - {os.path.basename(path.rstrip(os.sep))}")
+        if len(paths) > 8:
+            print(f"  ... {len(paths) - 8} more")
 
-        for plane in sorted(planes.keys()):
-            files = planes[plane]
-            print(f"\n  {plane.upper()} plane: {len(files)} file(s)")
-            for f in sorted(files)[:3]:
-                print(f"    - {f}")
-            if len(files) > 3:
-                print(f"    ... and {len(files) - 3} more")
+    if inspect:
+        if by_kind["2D"]:
+            print_metadata_report(by_kind["2D"][0])
+        if by_kind["3D"]:
+            print_metadata_report(by_kind["3D"][0])
 
-    if by_type["3D"]:
-        print(f"\n3D VOLUME FILES ({len(by_type['3D'])})")
-        print("-" * 80)
-        for f in sorted(by_type["3D"])[:5]:
-            print(f"  - {os.path.basename(f)}")
-        if len(by_type["3D"]) > 5:
-            print(f"  ... and {len(by_type['3D']) - 5} more")
-
-    print("\n" + "=" * 80)
-    print("NEXT STEPS")
-    print("=" * 80)
-
-    if by_type["2D"]:
-        print("\n✓ You have 2D plane files. Inspect one to see mesh structure:")
-        sample_2d = by_type["2D"][0]
-        print(f"  python XScripts/show_mesh_names.py '{sample_2d}'")
-
-    if by_type["3D"]:
-        print("\n✓ You have 3D volume files. Inspect one to see mesh structure:")
-        sample_3d = by_type["3D"][0]
-        print(f"  python XScripts/show_mesh_names.py '{sample_3d}'")
-
-    if by_type["2D"] and by_type["3D"]:
-        print("\n✓ You can use BOTH visualization scripts:")
-        print(f"  python XScripts/plot_2d_planes.py '{os.path.dirname(by_type['2D'][0])}'")
-        print(f"  python XScripts/plot_3d_slices.py '{os.path.dirname(by_type['3D'][0])}'")
+    print("\nSuggested next steps:")
+    if by_kind["2D"]:
+        sample = by_kind["2D"][0]
+        print(f"  python XScripts/show_mesh_names.py '{sample}'")
+        print(f"  python XScripts/inspect_chunks.py '{sample}' <variable>")
+        print(f"  python XScripts/plot_2d_planes.py '{data_dir}' --variable <variable>")
+    if by_kind["3D"]:
+        print(f"  python XScripts/plot_3d_slices.py '{data_dir}' --variable <variable> --axes xy")
 
     return 0
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Quick diagnostic for openPMD files in a directory")
-        print()
-        print("Usage: python quick_diagnose.py <directory>")
-        print()
-        print("Example: python quick_diagnose.py /lagoon/michailchabanov/frontier/...")
-        sys.exit(1)
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("data_dir")
+    parser.add_argument("--inspect", action="store_true", help="Open one sample and inspect metadata")
+    args = parser.parse_args()
+    return quick_diagnose(args.data_dir, inspect=args.inspect)
 
-    data_dir = sys.argv[1]
-    sys.exit(quick_diagnose(data_dir))
+
+if __name__ == "__main__":
+    sys.exit(main())
