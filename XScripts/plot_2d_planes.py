@@ -88,6 +88,14 @@ def _nearest_indices(coords, values):
     return np.where(choose_left, left, idx)
 
 
+def _axis_cell_extent(coords):
+    """Return the cell footprint covered by center coordinates."""
+    if len(coords) <= 1:
+        return coords.min(), coords.max()
+    half = 0.5 * np.nanmedian(np.abs(np.diff(coords)))
+    return coords.min() - half, coords.max() + half
+
+
 def _prepare_chunk_axes(data, y_coords, x_coords):
     """RegularGridInterpolator requires ascending axes."""
     if len(y_coords) > 1 and y_coords[0] > y_coords[-1]:
@@ -101,17 +109,22 @@ def _prepare_chunk_axes(data, y_coords, x_coords):
 
 def _write_chunk_to_canvas(canvas, grid_y, grid_x, data, y_coords, x_coords, method):
     data, y_coords, x_coords = _prepare_chunk_axes(data, y_coords, x_coords)
+    y_low, y_high = _axis_cell_extent(y_coords)
+    x_low, x_high = _axis_cell_extent(x_coords)
 
-    j0 = np.searchsorted(grid_y, max(y_coords.min(), grid_y.min()), side="left")
-    j1 = np.searchsorted(grid_y, min(y_coords.max(), grid_y.max()), side="right")
-    i0 = np.searchsorted(grid_x, max(x_coords.min(), grid_x.min()), side="left")
-    i1 = np.searchsorted(grid_x, min(x_coords.max(), grid_x.max()), side="right")
+    j0 = np.searchsorted(grid_y, max(y_low, grid_y.min()), side="left")
+    j1 = np.searchsorted(grid_y, min(y_high, grid_y.max()), side="right")
+    i0 = np.searchsorted(grid_x, max(x_low, grid_x.min()), side="left")
+    i1 = np.searchsorted(grid_x, min(x_high, grid_x.max()), side="right")
 
     if j1 <= j0 or i1 <= i0:
         return
 
     sub_y = grid_y[j0:j1]
     sub_x = grid_x[i0:i1]
+    jj = _nearest_indices(y_coords, sub_y)
+    ii = _nearest_indices(x_coords, sub_x)
+    nearest_values = data[np.ix_(jj, ii)]
 
     if method == "linear" and len(y_coords) > 1 and len(x_coords) > 1:
         try:
@@ -123,15 +136,21 @@ def _write_chunk_to_canvas(canvas, grid_y, grid_x, data, y_coords, x_coords, met
             )
             yy, xx = np.meshgrid(sub_y, sub_x, indexing="ij")
             values = interp(np.stack([yy, xx], axis=-1))
+            edge_mask = (
+                (sub_y[:, None] < y_coords.min()) |
+                (sub_y[:, None] > y_coords.max()) |
+                (sub_x[None, :] < x_coords.min()) |
+                (sub_x[None, :] > x_coords.max())
+            )
+            fill_mask = edge_mask & ~np.isfinite(values)
+            values[fill_mask] = nearest_values[fill_mask]
         except ImportError:
             values = None
     else:
         values = None
 
     if values is None:
-        jj = _nearest_indices(y_coords, sub_y)
-        ii = _nearest_indices(x_coords, sub_x)
-        values = data[np.ix_(jj, ii)]
+        values = nearest_values
 
     valid_mask = np.isfinite(values)
     if not np.any(valid_mask):

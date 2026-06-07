@@ -200,6 +200,26 @@ def filter_series_by_plane(files, tag=None, plane=None, normal_axis=None, elevat
     return out
 
 
+def axis_cell_extent(coords):
+    """Return the cell footprint covered by center coordinates."""
+    coords = np.asarray(coords)
+    if len(coords) <= 1:
+        return coords.min(), coords.max()
+    half = 0.5 * np.nanmedian(np.abs(np.diff(coords)))
+    return coords.min() - half, coords.max() + half
+
+
+def nearest_indices(coords, values):
+    """Nearest-neighbor indices for sorted coordinate centers."""
+    coords = np.asarray(coords)
+    values = np.asarray(values)
+    idx = np.searchsorted(coords, values)
+    idx = np.clip(idx, 0, len(coords) - 1)
+    left = np.clip(idx - 1, 0, len(coords) - 1)
+    choose_left = np.abs(values - coords[left]) < np.abs(values - coords[idx])
+    return np.where(choose_left, left, idx)
+
+
 def parse_iteration_number(filepath):
     """Extract iteration number from openPMD filename like 'name.it00012345.bp5'."""
     basename = os.path.basename(filepath)
@@ -343,17 +363,23 @@ class Canvas2D:
         method: 'nearest' or 'linear' (requires scipy)
         fill_edges: if True, erode the patch before writing to avoid seams
         """
-        # Find canvas region overlapping this patch
-        j0 = np.searchsorted(self.y, max(y_coords.min(), self.y.min()), side="left")
-        j1 = np.searchsorted(self.y, min(y_coords.max(), self.y.max()), side="right")
-        i0 = np.searchsorted(self.x, max(x_coords.min(), self.x.min()), side="left")
-        i1 = np.searchsorted(self.x, min(x_coords.max(), self.x.max()), side="right")
+        y_low, y_high = axis_cell_extent(y_coords)
+        x_low, x_high = axis_cell_extent(x_coords)
+
+        # Find canvas region overlapping this patch's cell footprint.
+        j0 = np.searchsorted(self.y, max(y_low, self.y.min()), side="left")
+        j1 = np.searchsorted(self.y, min(y_high, self.y.max()), side="right")
+        i0 = np.searchsorted(self.x, max(x_low, self.x.min()), side="left")
+        i1 = np.searchsorted(self.x, min(x_high, self.x.max()), side="right")
 
         if j1 <= j0 or i1 <= i0:
             return  # Patch outside canvas
 
         sub_y = self.y[j0:j1]
         sub_x = self.x[i0:i1]
+        jj = nearest_indices(y_coords, sub_y)
+        ii = nearest_indices(x_coords, sub_x)
+        nearest_data = data_2d[np.ix_(jj, ii)]
 
         if method == "linear":
             try:
@@ -363,13 +389,19 @@ class Canvas2D:
                                            bounds_error=False, fill_value=np.nan)
                 YY, XX = np.meshgrid(sub_y, sub_x, indexing="ij")
                 interp_data = f(np.stack([YY, XX], axis=-1))
+                edge_mask = (
+                    (sub_y[:, None] < y_coords.min()) |
+                    (sub_y[:, None] > y_coords.max()) |
+                    (sub_x[None, :] < x_coords.min()) |
+                    (sub_x[None, :] > x_coords.max())
+                )
+                fill_mask = edge_mask & ~np.isfinite(interp_data)
+                interp_data[fill_mask] = nearest_data[fill_mask]
             except ImportError:
                 method = "nearest"
 
         if method == "nearest":
-            jj = np.clip(np.searchsorted(y_coords, sub_y), 0, len(y_coords) - 1)
-            ii = np.clip(np.searchsorted(x_coords, sub_x), 0, len(x_coords) - 1)
-            interp_data = data_2d[np.ix_(jj, ii)]
+            interp_data = nearest_data
 
         # Write to canvas (skip NaN values)
         valid_mask = np.isfinite(interp_data)
