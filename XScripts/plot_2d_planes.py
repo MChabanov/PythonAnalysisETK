@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Visualize 2D plane data from PlanesX openPMD output.
 
-Reads plane files extracted at simulation runtime and creates publication-quality
-plots with optional movie assembly.
+Reads plane files extracted at simulation runtime, composites AMR levels,
+and creates publication-quality plots with optional movie assembly.
 
 Usage:
     python plot_2d_planes.py <data_dir> [--out-dir DIR] [--fps N] [--nxny N]
                              [--vmin V] [--vmax V] [--cmap CMAP] [--variable VAR]
-                             [--no-movie]
+                             [--edge-fill-pix N] [--no-composite] [--no-movie]
 """
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -23,8 +24,28 @@ from matplotlib import ticker
 import openpmd_common as opc
 
 
+def _erode(mask, n=1):
+    """Simple binary erosion to hide refinement boundaries."""
+    m = mask.astype(bool).copy()
+    for _ in range(max(0, int(n))):
+        up = np.zeros_like(m)
+        up[1:, :] = m[:-1, :]
+        down = np.zeros_like(m)
+        down[:-1, :] = m[1:, :]
+        left = np.zeros_like(m)
+        left[:, 1:] = m[:, :-1]
+        right = np.zeros_like(m)
+        right[:, :-1] = m[:, 1:]
+        m = m & up & down & left & right
+    return m
+
+
 def read_plane_file(filepath):
-    """Read a single openPMD plane file; return (iteration, data_dict, time_cu)."""
+    """Read a single openPMD plane file with all levels/patches.
+
+    Return (iteration, structured_data, time_cu) where structured_data is:
+    {variable_name: {level: {patch_id: (array, x_coords, y_coords)}, ...}}
+    """
     try:
         import openpmd_api as io
     except ImportError:
@@ -37,7 +58,6 @@ def read_plane_file(filepath):
         print(f"ERROR opening {filepath}: {e}")
         return None, None, None
 
-    # Typically one iteration per file
     iterations = list(series.iterations)
     if not iterations:
         series.close()
@@ -47,31 +67,109 @@ def read_plane_file(filepath):
     itobj = series.iterations[it]
     time_cu = opc.get_openpmd_time(series, it)
 
-    # Collect all meshes by variable name
-    data_dict = {}
+    # Organize data by variable, then level, then patch
+    # Format: mesh_name like "rho_lev0_patch0"
+    structured = {}
+    pattern = re.compile(r"(.+?)_lev(\d+)_patch(\d+)")
+
     try:
         for mesh_name in itobj.meshes:
             mesh = itobj.meshes[mesh_name]
-            # Simple strategy: treat each mesh as a variable
-            # In practice, parse mesh_name to extract variable label
+            m = pattern.match(mesh_name)
+            if not m:
+                continue  # Skip meshes that don't match pattern
+
+            var_name = m.group(1)
+            level = int(m.group(2))
+            patch_id = int(m.group(3))
+
+            if var_name not in structured:
+                structured[var_name] = {}
+            if level not in structured[var_name]:
+                structured[var_name][level] = {}
+
+            # Read all components
             for comp in mesh:
                 try:
                     field = opc.OpenPMDField(mesh, comp)
                     arr = field.read_full()
-                    var_label = f"{mesh_name}:{comp}"
-                    data_dict[var_label] = {
-                        "array": arr,
-                        "x": field.get_axis_coords(0),  # assuming 2D array [y, x]
-                        "y": field.get_axis_coords(1),
-                        "mesh": mesh,
-                    }
+                    x = field.get_axis_coords(0)
+                    y = field.get_axis_coords(1)
+                    structured[var_name][level][patch_id] = (arr, x, y)
                 except Exception as e:
-                    pass  # Skip variables that don't load
+                    pass
+
     except Exception as e:
         print(f"WARNING: Error reading meshes from {filepath}: {e}")
 
     series.close()
-    return it, data_dict, time_cu
+    return it, structured, time_cu
+
+
+def composite_amr_plane(var_levels_patches, edge_fill_pix=3, nxny=None):
+    """Composite multiple AMR levels into a single 2D plane.
+
+    var_levels_patches: dict of {level: {patch_id: (array, x_coords, y_coords)}}
+    Returns: (composited_array, (y_coords, x_coords)) on uniform canvas
+    """
+    if not var_levels_patches:
+        return None, None
+
+    # Auto-detect extent from coarsest level
+    all_x = []
+    all_y = []
+    for level_dict in var_levels_patches.values():
+        for arr, x, y in level_dict.values():
+            all_x.extend(x)
+            all_y.extend(y)
+
+    if not all_x or not all_y:
+        return None, None
+
+    all_x = np.array(all_x)
+    all_y = np.array(all_y)
+
+    # Create uniform canvas if nxny specified, otherwise use coarse resolution
+    if nxny is None:
+        nxny = max(len(all_x), len(all_y))
+
+    canvas = np.full((nxny, nxny), np.nan, dtype=np.float64)
+    g_y = np.linspace(all_y.min(), all_y.max(), nxny)
+    g_x = np.linspace(all_x.min(), all_x.max(), nxny)
+
+    # Process levels coarse → fine
+    for level in sorted(var_levels_patches.keys()):
+        for patch_id in sorted(var_levels_patches[level].keys()):
+            arr, patch_x, patch_y = var_levels_patches[level][patch_id]
+
+            # Find overlap on canvas
+            j0 = np.searchsorted(g_y, max(patch_y.min(), g_y.min()), side="left")
+            j1 = np.searchsorted(g_y, min(patch_y.max(), g_y.max()), side="right")
+            i0 = np.searchsorted(g_x, max(patch_x.min(), g_x.min()), side="left")
+            i1 = np.searchsorted(g_x, min(patch_x.max(), g_x.max()), side="right")
+
+            if j1 <= j0 or i1 <= i0:
+                continue
+
+            sub_y = g_y[j0:j1]
+            sub_x = g_x[i0:i1]
+
+            # Nearest-neighbor lookup (simpler than 3D interpolation)
+            jj = np.clip(np.searchsorted(patch_y, sub_y), 0, len(patch_y) - 1)
+            ii = np.clip(np.searchsorted(patch_x, sub_x), 0, len(patch_x) - 1)
+            sub = arr[np.ix_(jj, ii)]
+
+            # Erode fine patches to hide boundaries
+            valid = np.isfinite(sub)
+            core = _erode(valid, n=edge_fill_pix)
+            write_mask = core
+
+            if np.any(write_mask):
+                block = canvas[j0:j1, i0:i1]
+                block[write_mask] = sub[write_mask]
+                canvas[j0:j1, i0:i1] = block
+
+    return canvas, (g_y, g_x)
 
 
 def plot_plane(ax, data_2d, extent, vmin, vmax, cmap, title=""):
@@ -88,8 +186,8 @@ def plot_plane(ax, data_2d, extent, vmin, vmax, cmap, title=""):
 
 def process_plane_file(filepath, args, out_dir):
     """Read and plot a single plane file; return frame path or None."""
-    it, data_dict, time_cu = read_plane_file(filepath)
-    if it is None or not data_dict:
+    it, structured, time_cu = read_plane_file(filepath)
+    if it is None or not structured:
         print(f"  SKIP (no data): {filepath}")
         return None
 
@@ -97,23 +195,44 @@ def process_plane_file(filepath, args, out_dir):
 
     # Filter to requested variable if specified
     if args.variable:
-        matching = {k: v for k, v in data_dict.items() if args.variable.lower() in k.lower()}
+        matching = {k: v for k, v in structured.items() if args.variable.lower() in k.lower()}
         if not matching:
-            print(f"    Variable '{args.variable}' not found; available: {list(data_dict.keys())}")
+            print(f"    Variable '{args.variable}' not found; available: {list(structured.keys())}")
             return None
-        data_dict = matching
+        structured = matching
 
     # Create figure with one panel per variable
-    nvars = len(data_dict)
+    nvars = len(structured)
     fig, axes = plt.subplots(1, nvars, figsize=(5 * nvars, 4.5), constrained_layout=True)
     if nvars == 1:
         axes = [axes]
 
-    frames = []
-    for (var_label, var_data), ax in zip(sorted(data_dict.items()), axes):
-        arr = var_data["array"]
-        x = var_data["x"]
-        y = var_data["y"]
+    for (var_label, levels_patches), ax in zip(sorted(structured.items()), axes):
+        # Composite AMR levels if requested
+        if args.no_composite or len(levels_patches) == 1:
+            # Use only finest level
+            finest_level = max(levels_patches.keys())
+            finest_patches = levels_patches[finest_level]
+            # Merge all patches from finest level
+            all_arrays = [arr for arr, x, y in finest_patches.values()]
+            all_x = [x for arr, x, y in finest_patches.values()]
+            all_y = [y for arr, x, y in finest_patches.values()]
+
+            if all_arrays:
+                # Simple concatenation (assumes patches tile properly)
+                arr = np.concatenate(all_arrays, axis=1) if len(all_arrays) > 1 else all_arrays[0]
+                x = np.concatenate(all_x, axis=0) if len(all_x) > 1 else all_x[0]
+                y = np.concatenate(all_y, axis=0) if len(all_y) > 1 else all_y[0]
+            else:
+                continue
+        else:
+            # Composite all levels with proper boundary handling
+            arr, (y, x) = composite_amr_plane(levels_patches,
+                                             edge_fill_pix=args.edge_fill_pix,
+                                             nxny=args.nxny)
+            if arr is None:
+                continue
+
         extent = (x.min(), x.max(), y.min(), y.max())
 
         vmin = args.vmin if args.vmin else np.nanpercentile(arr, 1)
@@ -147,6 +266,10 @@ def main():
                        help="Colormap name")
     parser.add_argument("--variable", default=None,
                        help="Filter to variable(s) matching this substring")
+    parser.add_argument("--edge-fill-pix", type=int, default=3,
+                       help="Pixels to keep from coarse level at boundaries (default: 3)")
+    parser.add_argument("--no-composite", action="store_true",
+                       help="Skip AMR compositing; use only finest level per region")
     parser.add_argument("--no-movie", action="store_true",
                        help="Skip movie assembly")
     args = parser.parse_args()
