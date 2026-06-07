@@ -5,7 +5,12 @@ import sys
 import os
 
 def show_meshes(filepath):
-    """Display all meshes and components in a file."""
+    """Display all meshes and components in an openPMD file or directory.
+
+    Accepts both:
+    - Single files: file.bp5
+    - ADIOS2 parallel directories: file.bp5/ (contains data.0, data.1, ...)
+    """
     try:
         import openpmd_api as io
     except ImportError:
@@ -13,8 +18,11 @@ def show_meshes(filepath):
         return False
 
     filepath = os.path.abspath(os.path.expanduser(filepath))
-    if not os.path.isfile(filepath):
-        print(f"ERROR: File not found: {filepath}")
+    # Remove trailing slash for consistency
+    filepath = filepath.rstrip(os.sep)
+
+    if not (os.path.isfile(filepath) or os.path.isdir(filepath)):
+        print(f"ERROR: Path not found: {filepath}")
         return False
 
     print(f"Reading: {filepath}\n")
