@@ -17,19 +17,31 @@ def find_openpmd_files(root_dir, max_depth=3):
         return []
 
     files = []
-    for root, dirs, filenames in os.walk(root_dir):
-        # Limit depth
-        depth = root[len(root_dir):].count(os.sep)
-        if depth > max_depth:
-            dirs.clear()
-            continue
 
-        for filename in filenames:
-            for ext in ("bp5", "bp4", "bp", "h5"):
-                if filename.endswith(f".{ext}"):
-                    if ".md." not in filename and not filename.endswith(".dir"):
-                        files.append(os.path.join(root, filename))
-                    break
+    try:
+        for root, dirs, filenames in os.walk(root_dir):
+            # Limit depth
+            depth = root[len(root_dir):].count(os.sep)
+            if depth > max_depth:
+                dirs[:] = []  # Clear dirs in-place to prevent descent
+                continue
+
+            for filename in filenames:
+                # Skip metadata and lock files
+                if ".md." in filename or filename.endswith(".dir"):
+                    continue
+
+                # Check for openPMD extensions
+                for ext in ("bp5", "bp4", "bp", "h5"):
+                    if filename.endswith(f".{ext}"):
+                        filepath = os.path.join(root, filename)
+                        # Verify it's a file (not a link or special file)
+                        if os.path.isfile(filepath):
+                            files.append(filepath)
+                        break
+    except OSError as e:
+        print(f"WARNING: Error scanning directory: {e}")
+        pass
 
     return sorted(files)
 
@@ -269,7 +281,7 @@ def main():
     if len(sys.argv) < 2:
         print("Comprehensive diagnostic for openPMD simulation data")
         print()
-        print("Usage: python diagnose_data.py <root_directory>")
+        print("Usage: python diagnose_data.py <root_directory> [--verbose]")
         print()
         print("This script:")
         print("  1. Scans directory tree for all openPMD files")
@@ -278,15 +290,34 @@ def main():
         print("  4. Reports compatibility with visualization scripts")
         print()
         print("Example: python diagnose_data.py ~/simulations/")
+        print("         python diagnose_data.py ~/simulations/ --verbose")
         return 1
 
     root_dir = sys.argv[1]
+    verbose = "--verbose" in sys.argv
 
     print(f"Scanning {root_dir}...")
     files = find_openpmd_files(root_dir)
 
     if not files:
         print(f"✗ No openPMD files found in {root_dir}")
+        print()
+        print("Looking for files matching: *.bp5, *.bp4, *.bp, *.h5")
+        print(f"Excluding: .md.*, *.dir")
+        print()
+        print("Checking what's in the directory...")
+        try:
+            items = os.listdir(root_dir)
+            bp_files = [f for f in items if '.bp' in f or '.h5' in f]
+            if bp_files:
+                print(f"Found {len(bp_files)} openPMD-like files:")
+                for f in bp_files[:10]:
+                    print(f"  - {f}")
+            else:
+                print("No .bp* or .h5 files found at all")
+                print(f"Directory contains: {', '.join(items[:5])}...")
+        except Exception as e:
+            print(f"Could not list directory: {e}")
         return 1
 
     print(f"Found {len(files)} file(s), inspecting...")
