@@ -47,6 +47,19 @@ def safe_divide(numerator, denominator):
     return np.divide(numerator, denominator, out=out, where=valid)
 
 
+def announce_plot_selection(args):
+    """Print whether manual recipes or --variable controls this run."""
+    if MANUAL_PLOTS:
+        labels = [recipe.get("label", "manual") for recipe in MANUAL_PLOTS]
+        print(f"manual plot recipes active: {', '.join(labels)}")
+        if args.variable:
+            print(f"ignoring --variable {args.variable!r}")
+    elif args.variable:
+        print(f"manual plot recipes inactive; using --variable {args.variable!r}")
+    else:
+        print("manual plot recipes inactive; plotting all matching variables")
+
+
 def _iter_chunk_extents(field):
     """Yield clipped chunk offsets/extents without loading chunk data."""
     for off, ext in field.iter_chunk_extents():
@@ -534,6 +547,7 @@ def main():
 
     opc.setup_matplotlib_style()
     opc.apply_matplotlib_fontsize(args.fontsize)
+    announce_plot_selection(args)
 
     data_path = os.path.abspath(os.path.expanduser(args.data_path))
     files = opc.gather_openpmd_series(data_path)
