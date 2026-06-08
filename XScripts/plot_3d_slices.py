@@ -21,8 +21,32 @@ AXES = {
 }
 
 
+# Manual plot recipes. Leave this list empty to use --variable normally.
+# If this list is non-empty, --variable is ignored and only these recipes plot.
+#
+# Examples:
+# MANUAL_PLOTS = [
+#     {"label": "rho", "variables": {"rho": "hydrobasex_rho"}},
+#     {
+#         "label": "rho_over_press",
+#         "variables": {"rho": "hydrobasex_rho", "press": "hydrobasex_press"},
+#         "combine": lambda v: safe_divide(v["rho"], v["press"]),
+#     },
+# ]
+MANUAL_PLOTS = []
+
+
 def _safe_name(text):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
+
+
+def safe_divide(numerator, denominator):
+    """Divide arrays while returning NaN where the denominator is zero/bad."""
+    numerator = np.asarray(numerator, dtype=np.float64)
+    denominator = np.asarray(denominator, dtype=np.float64)
+    valid = np.isfinite(numerator) & np.isfinite(denominator) & (denominator != 0.0)
+    out = np.full_like(numerator, np.nan, dtype=np.float64)
+    return np.divide(numerator, denominator, out=out, where=valid)
 
 
 def _find_field_groups(iteration, variable_filter=None):
@@ -48,6 +72,29 @@ def _find_field_groups(iteration, variable_filter=None):
             )
 
     return groups
+
+
+def _select_group(groups, variable_filter):
+    """Choose one matched group for a manual source variable."""
+    labels = sorted(groups)
+    if not labels:
+        raise ValueError(f"no match for {variable_filter!r}")
+    if len(labels) == 1:
+        return labels[0], groups[labels[0]]
+
+    needle = str(variable_filter).lower()
+    exact = [label for label in labels if label.lower() == needle]
+    if len(exact) == 1:
+        return exact[0], groups[exact[0]]
+
+    contains = [label for label in labels if needle in label.lower()]
+    if len(contains) == 1:
+        return contains[0], groups[contains[0]]
+
+    preview = ", ".join(labels[:8])
+    if len(labels) > 8:
+        preview += ", ..."
+    raise ValueError(f"{variable_filter!r} matched multiple variables: {preview}")
 
 
 def _axis_coords(field, off, ext, axis):
@@ -127,9 +174,10 @@ def _extent_for_slice(levels, axes, slice_value):
     return None
 
 
-def composite_slice(series, levels, axis_name, nxny, method, slice_value):
+def composite_slice(series, levels, axis_name, nxny, method, slice_value, extent=None):
     axes = AXES[axis_name]
-    extent = _extent_for_slice(levels, axes, slice_value)
+    if extent is None:
+        extent = _extent_for_slice(levels, axes, slice_value)
     if extent is None:
         raise ValueError(f"no chunks intersect {axis_name} slice at {slice_value}")
 
@@ -151,6 +199,57 @@ def composite_slice(series, levels, axis_name, nxny, method, slice_value):
                 canvas.add_patch(slab, fast_coords, slow_coords, method=method)
 
     return canvas.data, canvas.x, canvas.y
+
+
+def _source_slice_data(series, iteration, variable_filter, axis_name, args, target_extent=None):
+    groups = _find_field_groups(iteration, variable_filter)
+    label, levels = _select_group(groups, variable_filter)
+    data, fast, slow = composite_slice(
+        series,
+        levels,
+        axis_name,
+        nxny=args.nxny,
+        method=args.method,
+        slice_value=args.slice_value,
+        extent=target_extent,
+    )
+    extent = (fast.min(), fast.max(), slow.min(), slow.max())
+    return label, data, fast, slow, extent
+
+
+def _manual_slice_data(series, iteration, recipe, axis_name, args):
+    variables = recipe.get("variables", {})
+    if not variables:
+        raise ValueError("manual recipe needs a non-empty 'variables' mapping")
+
+    target_extent = None
+    source_arrays = {}
+    fast = slow = None
+    source_labels = {}
+
+    for alias, variable_filter in variables.items():
+        label, data, fast, slow, source_extent = _source_slice_data(
+            series, iteration, variable_filter, axis_name, args, target_extent
+        )
+        if target_extent is None:
+            target_extent = source_extent
+        source_arrays[alias] = data
+        source_labels[alias] = label
+
+    combine = recipe.get("combine")
+    if combine is None:
+        if len(source_arrays) != 1:
+            raise ValueError("manual recipe with multiple variables needs 'combine'")
+        data = next(iter(source_arrays.values()))
+    else:
+        data = combine(source_arrays)
+
+    data = np.asarray(data, dtype=np.float64)
+    if data.shape != next(iter(source_arrays.values())).shape:
+        raise ValueError("manual recipe returned an array with the wrong shape")
+
+    label = recipe.get("label") or next(iter(source_labels.values()))
+    return label, data, fast, slow
 
 
 def _color_limits(data, args):
@@ -253,43 +352,69 @@ def process_file(filepath, args, out_dir):
         it = iterations[0]
         itobj = series.iterations[it]
         time_cu = opc.get_openpmd_time(series, it)
-        groups = _find_field_groups(itobj, args.variable)
-        if not groups:
-            print(f"SKIP: no matching 3D meshes in {filepath}")
-            return []
-
-        labels = sorted(groups)
-        if len(labels) > 1 and not args.all_variables:
-            print(f"using {labels[0]} from {filepath}; pass --all-variables to plot all")
-            labels = labels[:1]
-
         frames = []
         file_name = _safe_name(os.path.basename(filepath.rstrip(os.sep)))
 
-        for label in labels:
-            for axis_name in args.axes:
-                try:
-                    data, fast, slow = composite_slice(
-                        series,
-                        groups[label],
-                        axis_name,
-                        nxny=args.nxny,
-                        method=args.method,
-                        slice_value=args.slice_value,
+        if MANUAL_PLOTS:
+            for recipe in MANUAL_PLOTS:
+                for axis_name in args.axes:
+                    label = recipe.get("label", "manual")
+                    try:
+                        label, data, fast, slow = _manual_slice_data(
+                            series, itobj, recipe, axis_name, args
+                        )
+                    except Exception as exc:
+                        print(f"  SKIP {label} {axis_name}: {exc}")
+                        continue
+
+                    fig, ax = create_figure()
+                    plot_panel(ax, data, fast, slow, label, axis_name, it, time_cu, args)
+
+                    frame_name = (
+                        f"slice_{axis_name}_{_safe_name(label)}_{file_name}_it{it:08d}.png"
                     )
-                except Exception as exc:
-                    print(f"  SKIP {label} {axis_name}: {exc}")
-                    continue
+                    frame_path = os.path.join(out_dir, frame_name)
+                    plt.savefig(frame_path, bbox_inches="tight", dpi=args.dpi)
+                    plt.close(fig)
+                    frames.append(frame_path)
+                    print(f"wrote {frame_path}")
+        else:
+            groups = _find_field_groups(itobj, args.variable)
+            if not groups:
+                print(f"SKIP: no matching 3D meshes in {filepath}")
+                return []
 
-                fig, ax = create_figure()
-                plot_panel(ax, data, fast, slow, label, axis_name, it, time_cu, args)
+            labels = sorted(groups)
+            if len(labels) > 1 and not args.all_variables:
+                print(f"using {labels[0]} from {filepath}; pass --all-variables to plot all")
+                labels = labels[:1]
 
-                frame_name = f"slice_{axis_name}_{_safe_name(label)}_{file_name}_it{it:08d}.png"
-                frame_path = os.path.join(out_dir, frame_name)
-                plt.savefig(frame_path, bbox_inches="tight", dpi=args.dpi)
-                plt.close(fig)
-                frames.append(frame_path)
-                print(f"wrote {frame_path}")
+            for label in labels:
+                for axis_name in args.axes:
+                    try:
+                        data, fast, slow = composite_slice(
+                            series,
+                            groups[label],
+                            axis_name,
+                            nxny=args.nxny,
+                            method=args.method,
+                            slice_value=args.slice_value,
+                        )
+                    except Exception as exc:
+                        print(f"  SKIP {label} {axis_name}: {exc}")
+                        continue
+
+                    fig, ax = create_figure()
+                    plot_panel(ax, data, fast, slow, label, axis_name, it, time_cu, args)
+
+                    frame_name = (
+                        f"slice_{axis_name}_{_safe_name(label)}_{file_name}_it{it:08d}.png"
+                    )
+                    frame_path = os.path.join(out_dir, frame_name)
+                    plt.savefig(frame_path, bbox_inches="tight", dpi=args.dpi)
+                    plt.close(fig)
+                    frames.append(frame_path)
+                    print(f"wrote {frame_path}")
 
         return frames
     finally:

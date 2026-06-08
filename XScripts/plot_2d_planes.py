@@ -18,9 +18,33 @@ from matplotlib.colors import LogNorm
 import openpmd_common as opc
 
 
+# Manual plot recipes. Leave this list empty to use --variable normally.
+# If this list is non-empty, --variable is ignored and only these recipes plot.
+#
+# Examples:
+# MANUAL_PLOTS = [
+#     {"label": "rho", "variables": {"rho": "hydrobasex_rho"}},
+#     {
+#         "label": "rho_over_press",
+#         "variables": {"rho": "hydrobasex_rho", "press": "hydrobasex_press"},
+#         "combine": lambda v: safe_divide(v["rho"], v["press"]),
+#     },
+# ]
+MANUAL_PLOTS = []
+
+
 def _safe_name(path):
     name = os.path.basename(path.rstrip(os.sep))
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+
+
+def safe_divide(numerator, denominator):
+    """Divide arrays while returning NaN where the denominator is zero/bad."""
+    numerator = np.asarray(numerator, dtype=np.float64)
+    denominator = np.asarray(denominator, dtype=np.float64)
+    valid = np.isfinite(numerator) & np.isfinite(denominator) & (denominator != 0.0)
+    out = np.full_like(numerator, np.nan, dtype=np.float64)
+    return np.divide(numerator, denominator, out=out, where=valid)
 
 
 def _iter_chunk_extents(field):
@@ -78,6 +102,29 @@ def _find_variable_meshes(iteration, variable_filter=None):
             )
 
     return grouped, skipped
+
+
+def _select_group(groups, variable_filter):
+    """Choose one matched group for a manual source variable."""
+    labels = sorted(groups)
+    if not labels:
+        raise ValueError(f"no match for {variable_filter!r}")
+    if len(labels) == 1:
+        return labels[0], groups[labels[0]]
+
+    needle = str(variable_filter).lower()
+    exact = [label for label in labels if label.lower() == needle]
+    if len(exact) == 1:
+        return exact[0], groups[exact[0]]
+
+    contains = [label for label in labels if needle in label.lower()]
+    if len(contains) == 1:
+        return contains[0], groups[contains[0]]
+
+    preview = ", ".join(labels[:8])
+    if len(labels) > 8:
+        preview += ", ..."
+    raise ValueError(f"{variable_filter!r} matched multiple variables: {preview}")
 
 
 def _nearest_indices(coords, values):
@@ -212,6 +259,56 @@ def composite_variable(series, levels, nx=1024, ny=1024, method="linear", extent
     return canvas, grid_x, grid_y
 
 
+def _source_plot_data(series, iteration, variable_filter, args, target_extent=None):
+    groups, _ = _find_variable_meshes(iteration, variable_filter)
+    label, levels = _select_group(groups, variable_filter)
+    canvas, grid_x, grid_y = composite_variable(
+        series,
+        levels,
+        nx=args.nx,
+        ny=args.ny,
+        method=args.method,
+        extent=target_extent,
+    )
+    extent = (grid_x.min(), grid_x.max(), grid_y.min(), grid_y.max())
+    return label, canvas, grid_x, grid_y, extent
+
+
+def _manual_plot_data(series, iteration, recipe, args):
+    variables = recipe.get("variables", {})
+    if not variables:
+        raise ValueError("manual recipe needs a non-empty 'variables' mapping")
+
+    target_extent = args.extent
+    source_arrays = {}
+    grid_x = grid_y = None
+    source_labels = {}
+
+    for alias, variable_filter in variables.items():
+        label, canvas, grid_x, grid_y, source_extent = _source_plot_data(
+            series, iteration, variable_filter, args, target_extent
+        )
+        if target_extent is None:
+            target_extent = source_extent
+        source_arrays[alias] = canvas
+        source_labels[alias] = label
+
+    combine = recipe.get("combine")
+    if combine is None:
+        if len(source_arrays) != 1:
+            raise ValueError("manual recipe with multiple variables needs 'combine'")
+        data = next(iter(source_arrays.values()))
+    else:
+        data = combine(source_arrays)
+
+    data = np.asarray(data, dtype=np.float64)
+    if data.shape != next(iter(source_arrays.values())).shape:
+        raise ValueError("manual recipe returned an array with the wrong shape")
+
+    label = recipe.get("label") or next(iter(source_labels.values()))
+    return label, data, grid_x, grid_y
+
+
 def _color_limits(data, args):
     finite = data[np.isfinite(data)]
     if finite.size == 0:
@@ -323,36 +420,53 @@ def process_plane_file(filepath, args, out_dir):
         it = iterations[0]
         itobj = series.iterations[it]
         time_cu = opc.get_openpmd_time(series, it)
-        grouped, skipped = _find_variable_meshes(itobj, args.variable)
 
-        if skipped and args.verbose:
-            print(f"  skipped {len(skipped)} unparseable mesh name(s)")
+        if MANUAL_PLOTS:
+            fig, axes = create_figure(len(MANUAL_PLOTS))
+            plotted = 0
+            for ax, recipe in zip(axes, MANUAL_PLOTS):
+                label = recipe.get("label", "manual")
+                try:
+                    label, canvas, grid_x, grid_y = _manual_plot_data(
+                        series, itobj, recipe, args
+                    )
+                except Exception as exc:
+                    print(f"  SKIP {label}: {exc}")
+                    ax.set_visible(False)
+                    continue
+                plot_panel(ax, canvas, grid_x, grid_y, label, time_cu, args)
+                plotted += 1
+        else:
+            grouped, skipped = _find_variable_meshes(itobj, args.variable)
 
-        if not grouped:
-            print(f"SKIP: no matching 2D meshes in {filepath}")
-            return None
+            if skipped and args.verbose:
+                print(f"  skipped {len(skipped)} unparseable mesh name(s)")
 
-        labels = sorted(grouped)
-        fig, axes = create_figure(len(labels))
+            if not grouped:
+                print(f"SKIP: no matching 2D meshes in {filepath}")
+                return None
 
-        plotted = 0
-        for ax, label in zip(axes, labels):
-            try:
-                canvas, grid_x, grid_y = composite_variable(
-                    series,
-                    grouped[label],
-                    nx=args.nx,
-                    ny=args.ny,
-                    method=args.method,
-                    extent=args.extent,
-                )
-            except Exception as exc:
-                print(f"  SKIP {label}: {exc}")
-                ax.set_visible(False)
-                continue
+            labels = sorted(grouped)
+            fig, axes = create_figure(len(labels))
 
-            plot_panel(ax, canvas, grid_x, grid_y, label, time_cu, args)
-            plotted += 1
+            plotted = 0
+            for ax, label in zip(axes, labels):
+                try:
+                    canvas, grid_x, grid_y = composite_variable(
+                        series,
+                        grouped[label],
+                        nx=args.nx,
+                        ny=args.ny,
+                        method=args.method,
+                        extent=args.extent,
+                    )
+                except Exception as exc:
+                    print(f"  SKIP {label}: {exc}")
+                    ax.set_visible(False)
+                    continue
+
+                plot_panel(ax, canvas, grid_x, grid_y, label, time_cu, args)
+                plotted += 1
 
         if plotted == 0:
             plt.close(fig)
