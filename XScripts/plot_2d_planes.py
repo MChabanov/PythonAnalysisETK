@@ -234,6 +234,49 @@ def _color_limits(data, args):
     return vmin, vmax, norm
 
 
+def create_figure(n_panels):
+    """Create the output figure and return a list of axes."""
+    fig, axes = plt.subplots(
+        1, n_panels, figsize=(5.2 * n_panels, 4.8), constrained_layout=True
+    )
+    if n_panels == 1:
+        axes = [axes]
+    return fig, axes
+
+
+def panel_title(label, time_cu):
+    """Build a consistent panel title."""
+    title = label
+    if time_cu is not None:
+        title += f", t={time_cu:.3e}"
+    return title
+
+
+def plot_panel(ax, canvas, grid_x, grid_y, label, time_cu, args):
+    """Draw and style one 2D data panel."""
+    vmin, vmax, norm = _color_limits(canvas, args)
+    extent = (grid_x.min(), grid_x.max(), grid_y.min(), grid_y.max())
+    imshow_kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
+
+    im = ax.imshow(
+        canvas,
+        origin="lower",
+        extent=extent,
+        cmap=opc.setup_colormap(args.cmap),
+        interpolation="none",
+        **imshow_kwargs,
+    )
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(panel_title(label, time_cu))
+    ax.set_aspect("equal")
+    ax.tick_params(direction="in", top=True, right=True)
+
+    cbar = plt.colorbar(im, ax=ax, label=label)
+    cbar.ax.tick_params(direction="in")
+    return im
+
+
 def process_plane_file(filepath, args, out_dir):
     """Read and plot one plane series. Return the written frame path or None."""
     try:
@@ -267,11 +310,7 @@ def process_plane_file(filepath, args, out_dir):
             return None
 
         labels = sorted(grouped)
-        fig, axes = plt.subplots(
-            1, len(labels), figsize=(5.2 * len(labels), 4.8), constrained_layout=True
-        )
-        if len(labels) == 1:
-            axes = [axes]
+        fig, axes = create_figure(len(labels))
 
         plotted = 0
         for ax, label in zip(axes, labels):
@@ -289,24 +328,7 @@ def process_plane_file(filepath, args, out_dir):
                 ax.set_visible(False)
                 continue
 
-            vmin, vmax, norm = _color_limits(canvas, args)
-            extent = (grid_x.min(), grid_x.max(), grid_y.min(), grid_y.max())
-            imshow_kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
-            im = ax.imshow(
-                canvas,
-                origin="lower",
-                extent=extent,
-                cmap=opc.setup_colormap(args.cmap),
-                interpolation="none",
-                **imshow_kwargs,
-            )
-            ax.set_xlabel("x")
-            ax.set_ylabel("y")
-            title = label
-            if time_cu is not None:
-                title += f", t={time_cu:.3e}"
-            ax.set_title(title)
-            plt.colorbar(im, ax=ax, label=label)
+            plot_panel(ax, canvas, grid_x, grid_y, label, time_cu, args)
             plotted += 1
 
         if plotted == 0:

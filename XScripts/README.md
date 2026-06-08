@@ -183,6 +183,10 @@ Useful options:
 --no-movie          write PNG frames only
 ```
 
+Matplotlib styling for each panel is centralized in `plot_panel()` inside
+`plot_2d_planes.py`. Edit that function for axis labels, titles, aspect ratio,
+tick styling, colorbar placement, or other per-plot matplotlib customization.
+
 ## 3D Plotter Notes
 
 `plot_3d_slices.py` is intended for full 3D CarpetX output. It assumes record
