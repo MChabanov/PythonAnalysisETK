@@ -183,6 +183,26 @@ def panel_title(label, axis_name, iteration, time_cu):
     return title
 
 
+def font_kwargs(args):
+    """Return matplotlib keyword args for explicit text font size."""
+    return {"fontsize": args.fontsize} if args.fontsize is not None else {}
+
+
+def tick_kwargs(args, **base):
+    """Return matplotlib tick keyword args with optional label font size."""
+    if args.fontsize is not None:
+        base["labelsize"] = args.fontsize
+    return base
+
+
+def set_offset_fontsize(axis, args):
+    """Apply font size to matplotlib scientific-notation offset text."""
+    if args.fontsize is None:
+        return
+    axis.xaxis.get_offset_text().set_fontsize(args.fontsize)
+    axis.yaxis.get_offset_text().set_fontsize(args.fontsize)
+
+
 def plot_panel(ax, data, fast, slow, label, axis_name, iteration, time_cu, args):
     """Draw and style one extracted 2D slice panel."""
     extent = (fast.min(), fast.max(), slow.min(), slow.max())
@@ -197,14 +217,17 @@ def plot_panel(ax, data, fast, slow, label, axis_name, iteration, time_cu, args)
         interpolation="none",
         **imshow_kwargs,
     )
-    ax.set_xlabel(AXES[axis_name]["xlabel"])
-    ax.set_ylabel(AXES[axis_name]["ylabel"])
-    ax.set_title(panel_title(label, axis_name, iteration, time_cu))
+    ax.set_xlabel(AXES[axis_name]["xlabel"], **font_kwargs(args))
+    ax.set_ylabel(AXES[axis_name]["ylabel"], **font_kwargs(args))
+    ax.set_title(panel_title(label, axis_name, iteration, time_cu), **font_kwargs(args))
     ax.set_aspect("equal")
-    ax.tick_params(direction="in", top=True, right=True)
+    ax.tick_params(**tick_kwargs(args, direction="in", top=True, right=True))
+    set_offset_fontsize(ax, args)
 
-    cbar = plt.colorbar(im, ax=ax, label=label)
-    cbar.ax.tick_params(direction="in")
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label(label, **font_kwargs(args))
+    cbar.ax.tick_params(**tick_kwargs(args, direction="in"))
+    set_offset_fontsize(cbar.ax, args)
     return im
 
 
@@ -287,6 +310,8 @@ def main():
     parser.add_argument("--vmin", type=float, default=None)
     parser.add_argument("--vmax", type=float, default=None)
     parser.add_argument("--cmap", default="plasma")
+    parser.add_argument("--fontsize", type=float, default=None,
+                        help="Use one font size for plot labels, titles, ticks, and colorbars")
     parser.add_argument("--dpi", type=int, default=150)
     parser.add_argument("--fps", type=int, default=12)
     parser.add_argument("--no-movie", action="store_true")
@@ -297,8 +322,12 @@ def main():
     if bad_axes:
         print(f"ERROR: invalid axes: {', '.join(bad_axes)}")
         return 1
+    if args.fontsize is not None and args.fontsize <= 0:
+        print("ERROR: --fontsize must be positive")
+        return 1
 
     opc.setup_matplotlib_style()
+    opc.apply_matplotlib_fontsize(args.fontsize)
 
     data_path = os.path.abspath(os.path.expanduser(args.data_path))
     files = opc.gather_openpmd_series(data_path)

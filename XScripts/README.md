@@ -121,6 +121,7 @@ python XScripts/plot_2d_planes.py /path/to/planes \
   --nx 1200 --ny 800 \
   --vmin 1e-8 --vmax 1e-3 \
   --cmap plasma \
+  --fontsize 12 \
   --out-dir planes_frames \
   --no-movie
 ```
@@ -144,6 +145,7 @@ python XScripts/plot_3d_slices.py /path/to/3d_output \
   --nxny 1024 \
   --vmin 1e-8 --vmax 1e-3 \
   --cmap plasma \
+  --fontsize 12 \
   --out-dir slices_frames \
   --no-movie
 ```
@@ -176,6 +178,7 @@ Useful options:
 --vmin V            color scale minimum
 --vmax V            color scale maximum
 --cmap NAME         matplotlib colormap name, default plasma
+--fontsize SIZE     use one font size for labels, titles, ticks, and colorbars
 --method linear     linear interpolation, falls back to nearest without scipy
 --method nearest    nearest-neighbor sampling
 --scale log         logarithmic color scale, default

@@ -37,6 +37,24 @@ def setup_matplotlib_style(use_tex=None):
     return plt
 
 
+def apply_matplotlib_fontsize(fontsize):
+    """Use one font size for common matplotlib text elements."""
+    if fontsize is None:
+        return
+
+    from matplotlib import pyplot as plt
+
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "axes.labelsize": fontsize,
+        "axes.titlesize": fontsize,
+        "xtick.labelsize": fontsize,
+        "ytick.labelsize": fontsize,
+        "legend.fontsize": fontsize,
+        "figure.titlesize": fontsize,
+    })
+
+
 def is_openpmd_series_path(path):
     """Return True when path itself looks like an openPMD series file/directory."""
     path = os.path.abspath(os.path.expanduser(path)).rstrip(os.sep)
