@@ -170,6 +170,44 @@ def _color_limits(data, args):
     return vmin, vmax, norm
 
 
+def create_figure():
+    """Create a figure for one extracted 2D slice."""
+    return plt.subplots(figsize=(7.5, 6.5), constrained_layout=True)
+
+
+def panel_title(label, axis_name, iteration, time_cu):
+    """Build a consistent 3D-slice panel title."""
+    title = f"{label} {axis_name}, it={iteration}"
+    if time_cu is not None:
+        title += f", t={time_cu:.3e}"
+    return title
+
+
+def plot_panel(ax, data, fast, slow, label, axis_name, iteration, time_cu, args):
+    """Draw and style one extracted 2D slice panel."""
+    extent = (fast.min(), fast.max(), slow.min(), slow.max())
+    vmin, vmax, norm = _color_limits(data, args)
+    imshow_kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
+
+    im = ax.imshow(
+        data,
+        origin="lower",
+        extent=extent,
+        cmap=opc.setup_colormap(args.cmap),
+        interpolation="none",
+        **imshow_kwargs,
+    )
+    ax.set_xlabel(AXES[axis_name]["xlabel"])
+    ax.set_ylabel(AXES[axis_name]["ylabel"])
+    ax.set_title(panel_title(label, axis_name, iteration, time_cu))
+    ax.set_aspect("equal")
+    ax.tick_params(direction="in", top=True, right=True)
+
+    cbar = plt.colorbar(im, ax=ax, label=label)
+    cbar.ax.tick_params(direction="in")
+    return im
+
+
 def process_file(filepath, args, out_dir):
     try:
         import openpmd_api as io
@@ -220,25 +258,8 @@ def process_file(filepath, args, out_dir):
                     print(f"  SKIP {label} {axis_name}: {exc}")
                     continue
 
-                fig, ax = plt.subplots(figsize=(7.5, 6.5), constrained_layout=True)
-                extent = (fast.min(), fast.max(), slow.min(), slow.max())
-                vmin, vmax, norm = _color_limits(data, args)
-                imshow_kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
-                im = ax.imshow(
-                    data,
-                    origin="lower",
-                    extent=extent,
-                    cmap=opc.setup_colormap(args.cmap),
-                    interpolation="none",
-                    **imshow_kwargs,
-                )
-                ax.set_xlabel(AXES[axis_name]["xlabel"])
-                ax.set_ylabel(AXES[axis_name]["ylabel"])
-                title = f"{label} {axis_name}, it={it}"
-                if time_cu is not None:
-                    title += f", t={time_cu:.3e}"
-                ax.set_title(title)
-                plt.colorbar(im, ax=ax, label=label)
+                fig, ax = create_figure()
+                plot_panel(ax, data, fast, slow, label, axis_name, it, time_cu, args)
 
                 frame_name = f"slice_{axis_name}_{_safe_name(label)}_{file_name}_it{it:08d}.png"
                 frame_path = os.path.join(out_dir, frame_name)
