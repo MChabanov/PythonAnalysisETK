@@ -73,6 +73,17 @@ interp_order: 1
 # Output storage dtype. float32 halves file size; float64 preserves full precision.
 dtype: float64
 
+# Iteration query mode.
+#   parallel_query: yes -> every rank queries its own slice of `variables`
+#                          (variables[rank::size]) and resamples exactly those.
+#                          The expensive per-variable TOC parse + per-iteration
+#                          time reads are divided across ranks. The warmed
+#                          SimDir is gathered to rank 0, so the pickle written
+#                          (see simdir_pickle) is identical to the serial path.
+#   parallel_query: no  -> rank 0 queries every variable, then broadcasts.
+# Both produce identical output files; use `no` to A/B compare. Default: yes.
+parallel_query: yes
+
 # Subsample iterations: keep every Nth available iteration (1 = keep all).
 iteration_stride: 1
 

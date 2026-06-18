@@ -14,9 +14,9 @@ MPI structure, and on-disk schema, so output files are read by the same
 | File                            | Purpose                                                |
 | ------------------------------- | ------------------------------------------------------ |
 | `resample_2d.py`                | Launcher — dispatches to the backend named in config.  |
-| `resample_2d_data_postcactus.py`| MPI-parallel resampler — **postcactus** backend.       |
-| `resample_2d_data_kuibit.py`    | MPI-parallel resampler — **kuibit** backend (same out).|
-| `resample_common.py`            | Shared helpers: MPI/config/pickle-cache/iterations.    |
+| `resample_2d_data_postcactus.py`| `PostcactusBackend` — all postcactus coupling, nothing else. |
+| `resample_2d_data_kuibit.py`    | `KuibitBackend` — all kuibit coupling, nothing else.   |
+| `resample_common.py`            | The whole backend-agnostic pipeline: MPI/config, pickle cache, serial + parallel query, warm-state gather, HDF5 streaming (`run()`), and the `Backend` interface. |
 | `config_example.yaml`           | Documented template config; copy and edit per sim.     |
 | `read_data.py`                  | Helpers to read the HDF5 output back into numpy.        |
 
@@ -41,12 +41,32 @@ never holds more than one 2D slice in memory.
 Output goes to `output_dir` as `<variable>__<label>.h5`, e.g.
 `rho_b__dU_10_15_linear_HR.h5`.
 
-## Startup cost and the SimDir pickle cache
+## Startup cost: the iteration query and the SimDir pickle cache
 
-The simulation directory is scanned (and the per-variable iteration lists
-queried) **on rank 0 only** and then broadcast to all ranks, so the filesystem
-is hit once per job regardless of `-n`. On top of that, the scan result can be
-cached on disk between jobs:
+Startup has two costs: the **directory scan** (one recursive walk) and the
+**per-variable iteration query** (parse each file's table of contents, then read
+the time attribute of *every* iteration). On network filesystems the query
+often dominates, because it is many small metadata reads × number of variables.
+
+### Parallel vs. serial query (`parallel_query`)
+
+```yaml
+parallel_query: yes   # default
+```
+
+- **`yes` (default):** rank 0 does the directory scan once and broadcasts the
+  SimDir; then **every rank queries its own slice of `variables`**
+  (`variables[rank::size]`) and resamples exactly those. The query cost is
+  divided across ranks (up to the number of variables). The per-rank warmed
+  caches are gathered to rank 0, which reassembles the fully-warmed SimDir and
+  writes the pickle — so the on-disk pickle is **identical** to the serial path.
+- **`no`:** rank 0 queries *every* variable itself, then broadcasts the SimDir
+  and the iteration tables. This is the original behaviour, kept for A/B
+  comparison; both modes produce identical output files.
+
+The directory scan always happens once on rank 0 (then broadcast), so the
+filesystem walk is hit once per job regardless of `-n` or query mode. On top of
+that, the scan + query result can be cached on disk between jobs:
 
 ```yaml
 simdir_pickle:
