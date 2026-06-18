@@ -45,10 +45,25 @@ class KuibitBackend(Backend):
     name = "kuibit"
 
     def scan(self, cfg):
+        self._warn_unsupported_exclude(cfg)
+        return SimDir(cfg["simdir"], max_depth=int(cfg["scan_max_depth"]))
+
+    def scan_shallow(self, cfg):
+        # max_depth=0 walks nothing but still captures path + SIMFACTORY parfile.
+        return SimDir(cfg["simdir"], max_depth=0)
+
+    def walk_spec(self, cfg):
+        self._warn_unsupported_exclude(cfg)
+        # kuibit's default ignored dirs (see SimDir.__init__); no file globbing.
+        excl = {"SIMFACTORY", "report", "movies", "tmp", "temp"}
+        return {"excluded_dirs": excl, "skip_file": None,
+                "max_depth": int(cfg["scan_max_depth"])}
+
+    @staticmethod
+    def _warn_unsupported_exclude(cfg):
         if cfg["simdir_exclude"]["dirs"] or cfg["simdir_exclude"]["files"]:
             log("  WARNING: simdir_exclude is not supported by the kuibit "
                 "backend and will be ignored")
-        return SimDir(cfg["simdir"])
 
     def plane_index(self, sim, cfg):
         return sim.gridfunctions[cfg["plane"]]

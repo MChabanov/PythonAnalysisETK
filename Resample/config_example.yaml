@@ -53,6 +53,21 @@ label: dU_10_15_linear_HR
 # Directory where the resampled HDF5 files are written (created if missing).
 output_dir: ./resampled
 
+# Directory scan mode.
+#   parallel_scan: yes -> the directory walk is distributed across ranks: rank 0
+#                         lists the top-level subdirectories below `simdir` and
+#                         hands each rank a share to walk recursively, then the
+#                         file index is assembled on rank 0. Helps when the tree
+#                         has many subdirectories; little benefit for one giant
+#                         flat directory. Ignored when loading a pickle.
+#   parallel_scan: no  -> rank 0 walks the whole tree itself (original behaviour).
+# Both find the same files; use `no` to A/B compare. Default: yes.
+parallel_scan: yes
+
+# Maximum directory recursion depth for the scan (both modes). Lower it to prune
+# deep per-process subtrees you don't need. Default: 8.
+scan_max_depth: 8
+
 # Slice plane to read: one of xy, xz, yz.
 plane: xy
 
@@ -83,6 +98,20 @@ dtype: float64
 #   parallel_query: no  -> rank 0 queries every variable, then broadcasts.
 # Both produce identical output files; use `no` to A/B compare. Default: yes.
 parallel_query: yes
+
+# Resampling granularity.
+#   resample_chunks: 1 -> one output file per variable, written by one rank
+#                         (original behaviour). Parallelism is capped at the
+#                         number of variables.
+#   resample_chunks: N -> split each variable's iterations into N contiguous
+#                         chunks and distribute the (variable, chunk) tasks
+#                         across ranks, so up to (variables x N) ranks stay busy.
+#                         Each chunk is written to a temporary partial file, then
+#                         merged into the one final per-variable file. Output is
+#                         identical to resample_chunks: 1.
+# Use N > 1 when you have more ranks than variables (e.g. long time series).
+# Default: 1.
+resample_chunks: 1
 
 # Subsample iterations: keep every Nth available iteration (1 = keep all).
 iteration_stride: 1
