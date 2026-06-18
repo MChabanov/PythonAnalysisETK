@@ -37,12 +37,19 @@ See ``config_example.yaml`` for all options. Read the output with
 ``read_data.py`` (or any HDF5 reader).
 """
 
+import fnmatch
+import re
+
 import numpy as np
 
 from postcactus.simdir import SimDir
 from postcactus import grid_data as gd
 
 from resample_common import Backend, grid_bounds, run
+
+# Directory names postcactus always excludes from its scan (see
+# SimDir._scan_folders); the parallel walk must use the same set.
+_STANDARD_EXCLUDES = {"SIMFACTORY", "report", "movies", "tmp", "temp"}
 
 
 def _extract_array(slice_obj):
@@ -71,16 +78,32 @@ class PostcactusBackend(Backend):
 
     def scan(self, cfg):
         excl = cfg["simdir_exclude"]
+        max_depth = int(cfg["scan_max_depth"])
         # Only pass exclusion kwargs when actually requested: older postcactus
-        # builds expose SimDir(path) without exclude_dirs/exclude_files, and
-        # the common (no-exclusion) case should work against those too.
+        # builds expose SimDir(path, max_depth) without exclude_dirs/
+        # exclude_files, and the common (no-exclusion) case should work there too.
         if excl["dirs"] or excl["files"]:
             return SimDir(
-                cfg["simdir"],
+                cfg["simdir"], max_depth=max_depth,
                 exclude_dirs=excl["dirs"] or None,
                 exclude_files=excl["files"] or None,
             )
-        return SimDir(cfg["simdir"])
+        return SimDir(cfg["simdir"], max_depth=max_depth)
+
+    def scan_shallow(self, cfg):
+        # max_depth=0 walks nothing but still captures path + SIMFACTORY parfile.
+        return SimDir(cfg["simdir"], max_depth=0)
+
+    def walk_spec(self, cfg):
+        excl = set(_STANDARD_EXCLUDES) | set(cfg["simdir_exclude"]["dirs"])
+        skip_file = None
+        patterns = cfg["simdir_exclude"]["files"]
+        if patterns:
+            # One combined regex matched against basenames, as in postcactus.
+            rx = re.compile("|".join(fnmatch.translate(str(p)) for p in patterns))
+            skip_file = rx.match
+        return {"excluded_dirs": excl, "skip_file": skip_file,
+                "max_depth": int(cfg["scan_max_depth"])}
 
     def plane_index(self, sim, cfg):
         # sd.grid is a cached omni reader (HDF5 + ASCII) per plane; the same

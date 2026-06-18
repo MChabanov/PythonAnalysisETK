@@ -36,7 +36,9 @@ mpirun -n 8 python resample_2d_data_kuibit.py my_sim.yaml       # kuibit
 `-n` (MPI ranks) can be any value ≥ 1. Variables are spread round-robin across
 ranks and each rank writes its own files, so there is no required process count
 and no gather step. Iterations are streamed slice-by-slice into HDF5, so a rank
-never holds more than one 2D slice in memory.
+never holds more than one 2D slice in memory. To use **more ranks than
+variables**, set `resample_chunks` (see below) to split each variable across
+ranks.
 
 Output goes to `output_dir` as `<variable>__<label>.h5`, e.g.
 `rho_b__dU_10_15_linear_HR.h5`.
@@ -64,9 +66,26 @@ parallel_query: yes   # default
   and the iteration tables. This is the original behaviour, kept for A/B
   comparison; both modes produce identical output files.
 
-The directory scan always happens once on rank 0 (then broadcast), so the
-filesystem walk is hit once per job regardless of `-n` or query mode. On top of
-that, the scan + query result can be cached on disk between jobs:
+### Parallel vs. serial scan (`parallel_scan`)
+
+```yaml
+parallel_scan: yes    # default
+scan_max_depth: 8     # bound recursion depth (both modes)
+```
+
+- **`yes` (default):** rank 0 lists the top-level subdirectories below `simdir`
+  and hands each rank a share to walk recursively; the file lists are gathered
+  and the index assembled on rank 0. This parallelises the metadata-bound walk
+  across ranks and helps trees with **many subdirectories** (e.g. many
+  `output-NNNN/` restarts). It does little for a single huge *flat* directory
+  (one server still serializes that listing), and is skipped when loading a
+  pickle.
+- **`no`:** rank 0 walks the whole tree itself (original behaviour).
+
+Both modes find the same files. The cheapest scan win is still pruning: set
+`scan_max_depth` low, and use `simdir_exclude.dirs` (below) to skip
+checkpoint/3D subtrees entirely. On top of that, the scan + query result can be
+cached on disk between jobs:
 
 ```yaml
 simdir_pickle:
@@ -107,6 +126,29 @@ results (the walk still lists every entry), useful when checkpoints sit in
 the same folders as the 2D data. **Make sure the globs never match the files
 you resample** (`*.xy.h5` etc.) or the parfiles. The kuibit backend ignores
 this option (kuibit's SimDir has no equivalent) and warns if it is set.
+
+## Scaling resampling past the variable count (`resample_chunks`)
+
+By default the unit of work is one variable → one file → one rank, so resampling
+parallelism is capped at the number of variables (and load is uneven when some
+variables have far more iterations than others). To keep more ranks busy:
+
+```yaml
+resample_chunks: 4    # default 1
+```
+
+With `resample_chunks: N`, each variable's iterations are split into `N`
+contiguous chunks and the `(variable, chunk)` tasks are distributed round-robin
+across ranks — so up to `variables × N` ranks do useful work. Each chunk is
+written to a temporary `…__<label>.partNNNN.h5` file, then one rank per variable
+**merges** the chunks (streaming slice-by-slice, bounded memory) into the single
+final `…__<label>.h5` and deletes the partials. The merged output is identical
+to `resample_chunks: 1`, so this is purely a scaling knob.
+
+Useful when `-n` exceeds the number of variables, especially for long time
+series. Note the extra merge pass reads and rewrites the data once; and with
+many ranks all reading the AMR files at once you may become read-bandwidth
+bound rather than CPU bound.
 
 ## Reading the output
 
