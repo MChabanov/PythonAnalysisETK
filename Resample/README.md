@@ -146,9 +146,11 @@ final `…__<label>.h5` and deletes the partials. The merged output is identical
 to `resample_chunks: 1`, so this is purely a scaling knob.
 
 Useful when `-n` exceeds the number of variables, especially for long time
-series. Note the extra merge pass reads and rewrites the data once; and with
-many ranks all reading the AMR files at once you may become read-bandwidth
-bound rather than CPU bound.
+series. The merge is cheap: chunks are copied verbatim (compressed bytes
+relocated with `read_direct_chunk`/`write_direct_chunk`, no decompress/
+recompress), so it is disk-bandwidth bound, not CPU bound. With many ranks all
+reading the AMR files at once you may instead hit read-bandwidth limits during
+the resample phase.
 
 ## Reading the output
 

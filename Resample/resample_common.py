@@ -761,8 +761,17 @@ def _resample_chunked(backend, plane_index, full_var_iters, coords, cfg, chunks)
 
 
 def _merge_variable(backend, var, coords, cfg, chunks):
-    """Concatenate a variable's chunk partials into its final file, streaming
-    slice-by-slice (bounded memory), then delete the partials."""
+    """Concatenate a variable's chunk partials into its final file, then delete
+    the partials.
+
+    The partials and the final file share dtype, chunk shape (one slice per
+    chunk) and compression - they are all created from the same config - so each
+    slice's chunk is copied *verbatim* with ``read_direct_chunk`` /
+    ``write_direct_chunk``: the compressed bytes are relocated without
+    decompress/recompress or a numpy round-trip, one chunk in memory at a time.
+    The iteration/time indices are read in the same pass, so each partial is
+    opened only once.
+    """
     parts = [_part_path(cfg, var, ci) for ci in range(chunks)]
     parts = [p for p in parts if os.path.exists(p)]
     if not parts:
@@ -775,20 +784,11 @@ def _merge_variable(backend, var, coords, cfg, chunks):
     compression = "gzip" if cfg["compression_level"] else None
     comp_opts = int(cfg["compression_level"]) if cfg["compression_level"] else None
 
-    # First pass over the small index datasets to size the output.
-    iters_parts, times_parts = [], []
-    for p in parts:
-        with h5py.File(p, "r") as h5:
-            iters_parts.append(h5["iterations"][:])
-            times_parts.append(h5["times"][:])
-    iters_cat = np.concatenate(iters_parts)
-    times_cat = np.concatenate(times_parts)
-    total = iters_cat.shape[0]
-
     final_path = variable_path(cfg, var)
+    iters_parts, times_parts = [], []
     with h5py.File(final_path, "w") as h5:
         dset = h5.create_dataset(
-            "data", shape=(total, nx, ny), dtype=out_dtype,
+            "data", shape=(0, nx, ny), maxshape=(None, nx, ny), dtype=out_dtype,
             compression=compression, compression_opts=comp_opts,
             chunks=(1, nx, ny),
         )
@@ -797,12 +797,19 @@ def _merge_variable(backend, var, coords, cfg, chunks):
             with h5py.File(p, "r") as part:
                 src = part["data"]
                 n = src.shape[0]
-                for i in range(n):  # per-slice copy keeps memory bounded
-                    dset[offset + i] = src[i]
+                dset.resize(offset + n, axis=0)
+                for i in range(n):  # verbatim chunk copy, bounded memory
+                    filter_mask, raw = src.id.read_direct_chunk((i, 0, 0))
+                    dset.id.write_direct_chunk((offset + i, 0, 0), raw,
+                                               filter_mask=filter_mask)
+                iters_parts.append(part["iterations"][:])
+                times_parts.append(part["times"][:])
                 offset += n
 
-        h5.create_dataset("iterations", data=iters_cat.astype(np.int64))
-        h5.create_dataset("times", data=times_cat.astype(np.float64))
+        h5.create_dataset("iterations",
+                          data=np.concatenate(iters_parts).astype(np.int64))
+        h5.create_dataset("times",
+                          data=np.concatenate(times_parts).astype(np.float64))
         h5.create_dataset("x", data=coords[0])
         h5.create_dataset("y", data=coords[1])
         h5.attrs["variable"] = var
@@ -817,4 +824,4 @@ def _merge_variable(backend, var, coords, cfg, chunks):
         os.remove(p)
 
     print("[rank %d] merged %s (%d chunks, %d iterations)"
-          % (rank, final_path, len(parts), total), flush=True)
+          % (rank, final_path, len(parts), offset), flush=True)
