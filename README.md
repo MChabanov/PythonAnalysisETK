@@ -4,12 +4,15 @@ Analysis and visualization pipeline for Einstein Toolkit simulation output.
 
 | Directory    | Contents                                                                 |
 | ------------ | ------------------------------------------------------------------------ |
-| `Resample/`  | MPI-parallel resampling of 2D slices onto a regular grid, saved as HDF5. |
+| `Resample/`  | MPI-parallel resampling onto a regular grid, saved as HDF5 — either the 2D slices Carpet wrote, or an arbitrary plane cut out of the full 3D output. |
 | `Frames/`    | MPI-parallel rendering of movie frames (and mp4) from the HDF5 files.    |
 | `Notebooks/` | Interactive analysis; previews frames and writes the movie config.       |
+| `XScripts/`  | CarpetX / PlanesX openPMD (BP5/HDF5) inspection and plotting — a separate track, no postcactus/kuibit. |
 | `Archive/`   | Legacy pickle-based scripts and notebooks (superseded by the above).     |
 
-See `Resample/README.md` and `Frames/README.md` for usage of each stage.
+See `Resample/README.md` and `Frames/README.md` for usage of each stage. Both
+resampling pipelines write the same on-disk schema, so `Frames/` and
+`Notebooks/` work on 2D-sliced and 3D-plane-cut data without any change.
 
 ## Conda environment
 

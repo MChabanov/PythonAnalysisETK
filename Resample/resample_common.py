@@ -52,8 +52,13 @@ def abort(message):
 # Configuration
 # ---------------------------------------------------------------------------
 
-def load_config(path):
-    """Load and validate the YAML configuration on rank 0."""
+def load_config(path, backend=None):
+    """Load and validate the YAML configuration on rank 0.
+
+    Backend-specific keys are checked (and their defaults filled in) by
+    ``backend.validate_config`` at the end, so e.g. the meaning of ``plane``
+    can differ between the 2D and 3D backends.
+    """
     with open(path) as f:
         cfg = yaml.safe_load(f)
 
@@ -110,8 +115,8 @@ def load_config(path):
         se[key] = [str(v) for v in val]
     cfg["simdir_exclude"] = se
 
-    if cfg["plane"] not in ("xy", "xz", "yz"):
-        abort("plane must be one of xy, xz, yz (got %r)" % cfg["plane"])
+    if backend is not None:
+        backend.validate_config(cfg)
 
     return cfg
 
@@ -249,6 +254,50 @@ class Backend(ABC):
     #: Short name, stored in the output files as the ``backend`` attribute.
     name = "abstract"
 
+    # -- optional hooks (concrete defaults; override where needed) ----------
+
+    def validate_config(self, cfg):
+        """Check backend-specific config keys and fill in their defaults.
+
+        Called on rank 0 at the end of :func:`load_config`, so it may
+        :func:`abort`. The default enforces the 2D pipeline's plane naming;
+        backends reading 3D data override it to accept a plane specification.
+        """
+        if cfg["plane"] not in ("xy", "xz", "yz"):
+            abort("plane must be one of xy, xz, yz (got %r)" % cfg["plane"])
+
+    def extra_output_attrs(self, cfg):
+        """Backend-specific HDF5 attributes for the output files.
+
+        Merged last by :func:`output_attrs`, so this may also override one of
+        the common entries - e.g. the ``plane`` label of a 3D plane cut.
+        """
+        return {}
+
+    def build_time_tables(self, cfg, var_iters, sim):
+        """Rank 0: precompute whatever depends on the full iteration list.
+
+        Called once, after the iteration query, with ``{var: (iters, times)}``
+        for *every* variable; the return value is broadcast to all ranks and
+        handed back through :meth:`set_time_tables`. This is where anything
+        that must be consistent across iterations belongs - the 3D backend
+        builds its moving-plane frames here, because ranks resample iterations
+        out of order and so cannot derive a frame from the previous one.
+        Return None if there is nothing to precompute.
+        """
+        return None
+
+    def set_time_tables(self, tables):
+        """All ranks: receive the broadcast result of :meth:`build_time_tables`."""
+
+    def per_iteration_data(self, cfg, var, iters):
+        """Extra per-iteration datasets, ``{name: array}`` with ``len(iters)``
+        rows, written alongside ``iterations``/``times`` and concatenated by
+        the chunk merge in the same way."""
+        return {}
+
+    # -- required interface -------------------------------------------------
+
     @abstractmethod
     def scan(self, cfg):
         """Build and return the SimDir by scanning ``cfg['simdir']`` on disk
@@ -313,6 +362,27 @@ def variable_path(cfg, var):
     )
 
 
+def output_attrs(backend, cfg, var):
+    """The HDF5 attributes describing one output file.
+
+    Shared by the direct writer and the chunk merge so the two can never drift
+    apart. ``backend.extra_output_attrs`` is merged last and may override an
+    entry.
+    """
+    resolution, _, _ = grid_bounds(cfg["grid"])
+    attrs = {
+        "variable": var,
+        "label": cfg["label"],
+        "plane": cfg["plane"],
+        "simdir": cfg["simdir"],
+        "interp_order": cfg["interp_order"],
+        "resolution": resolution,
+        "backend": backend.name,
+    }
+    attrs.update(backend.extra_output_attrs(cfg))
+    return attrs
+
+
 def process_variable(backend, plane_index, var, iters, times, coords, cfg,
                      out_path=None, write_meta=True):
     """Resample the given iterations of one variable and stream them into HDF5.
@@ -362,20 +432,16 @@ def process_variable(backend, plane_index, var, iters, times, coords, cfg,
                       % (rank, var, i + 1, n_iter,
                          (time.perf_counter() - t_var) / (i + 1)), flush=True)
 
-        # The iteration/time axis always travels with the data (the merge step
+        # Per-iteration datasets always travel with the data (the merge step
         # relies on it); coordinates and metadata only for complete files.
         h5.create_dataset("iterations", data=np.asarray(iters, dtype=np.int64))
         h5.create_dataset("times", data=np.asarray(times, dtype=np.float64))
+        for name, values in backend.per_iteration_data(cfg, var, iters).items():
+            h5.create_dataset(name, data=np.asarray(values))
         if write_meta:
             h5.create_dataset("x", data=coords[0])
             h5.create_dataset("y", data=coords[1])
-            h5.attrs["variable"] = var
-            h5.attrs["label"] = cfg["label"]
-            h5.attrs["plane"] = cfg["plane"]
-            h5.attrs["simdir"] = cfg["simdir"]
-            h5.attrs["interp_order"] = cfg["interp_order"]
-            h5.attrs["resolution"] = resolution
-            h5.attrs["backend"] = backend.name
+            h5.attrs.update(output_attrs(backend, cfg, var))
 
     return out_path, n_iter, timing
 
@@ -529,7 +595,7 @@ def run(backend):
         parser = argparse.ArgumentParser()
         parser.add_argument("config", help="Path to the YAML configuration file.")
         args = parser.parse_args()
-        cfg = load_config(args.config)
+        cfg = load_config(args.config, backend)
         os.makedirs(cfg["output_dir"], exist_ok=True)
     cfg = comm.bcast(cfg, root=0)
 
@@ -560,6 +626,19 @@ def run(backend):
         sim, my_var_iters, full_var_iters = _query_serial(backend, cfg, sim_cold)
 
     plane_index = backend.plane_index(sim, cfg)
+
+    # --- Phase 2b: precompute anything that needs the whole iteration list ---
+    # Rank 0 has the full {var: (iters, times)} map in both query modes. A
+    # moving plane's frames are built here so that they are consistent and
+    # continuous across iterations that different ranks will resample.
+    t0 = time.perf_counter()
+    tables = backend.build_time_tables(cfg, full_var_iters, sim) if rank == 0 \
+        else None
+    tables = comm.bcast(tables, root=0)
+    backend.set_time_tables(tables)
+    if tables is not None:
+        log("Precomputed per-iteration tables: %.2f s"
+            % (time.perf_counter() - t0))
 
     # --- Phase 3: resample ---
     if chunks <= 1:
@@ -786,6 +865,7 @@ def _merge_variable(backend, var, coords, cfg, chunks):
 
     final_path = variable_path(cfg, var)
     iters_parts, times_parts = [], []
+    extra_parts = {}          # any further per-iteration dataset, in part order
     with h5py.File(final_path, "w") as h5:
         dset = h5.create_dataset(
             "data", shape=(0, nx, ny), maxshape=(None, nx, ny), dtype=out_dtype,
@@ -804,21 +884,23 @@ def _merge_variable(backend, var, coords, cfg, chunks):
                                                filter_mask=filter_mask)
                 iters_parts.append(part["iterations"][:])
                 times_parts.append(part["times"][:])
+                # Anything else in the partial is per-iteration too (the plane
+                # geometry of a moving plane, say) and concatenates the same way.
+                for name in part:
+                    if name in ("data", "iterations", "times"):
+                        continue
+                    extra_parts.setdefault(name, []).append(part[name][:])
                 offset += n
 
         h5.create_dataset("iterations",
                           data=np.concatenate(iters_parts).astype(np.int64))
         h5.create_dataset("times",
                           data=np.concatenate(times_parts).astype(np.float64))
+        for name, pieces in extra_parts.items():
+            h5.create_dataset(name, data=np.concatenate(pieces))
         h5.create_dataset("x", data=coords[0])
         h5.create_dataset("y", data=coords[1])
-        h5.attrs["variable"] = var
-        h5.attrs["label"] = cfg["label"]
-        h5.attrs["plane"] = cfg["plane"]
-        h5.attrs["simdir"] = cfg["simdir"]
-        h5.attrs["interp_order"] = cfg["interp_order"]
-        h5.attrs["resolution"] = resolution
-        h5.attrs["backend"] = backend.name
+        h5.attrs.update(output_attrs(backend, cfg, var))
 
     for p in parts:
         os.remove(p)
