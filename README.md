@@ -14,6 +14,10 @@ See `Resample/README.md` and `Frames/README.md` for usage of each stage. Both
 resampling pipelines write the same on-disk schema, so `Frames/` and
 `Notebooks/` work on 2D-sliced and 3D-plane-cut data without any change.
 
+`AGENT.md` collects the operational side: SLURM batch-environment setup, how to
+verify a moving-plane run after the fact, movie-encoding recipes, and measured
+costs from a production run.
+
 ## Conda environment
 
 A single environment that runs every script and notebook in the repo
