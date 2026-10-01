@@ -28,6 +28,7 @@ currently has postcactus only.
 | `resample_3d.py`                | 3D launcher — same dispatch, 3D backends.             |
 | `resample_3d_data_postcactus.py`| `Postcactus3DBackend` — subclasses the 2D postcactus backend; only the read/resample step differs. |
 | `plane_geom.py`                 | `PlaneSpec`: the plane's in-plane frame, its sample points, and the culling tests that keep 3D reads small. numpy only. |
+| `derivatives_3d.py`             | Centred finite-difference derivatives (1st/2nd, mixed; accuracy 2/4/6) of a uniformly spaced array, with stencil trimming, and parsing of the config's `derivatives` block. numpy only, plane-agnostic. |
 | `plane_motion.py`               | Time-dependent planes: builds the per-iteration frame table (static / analytic / trajectory-driven), reads trajectory files, enforces continuity. |
 | `plane_module_example.py`       | Template for an `analytic` plane — copy and edit.       |
 | `inspect_plane.py`              | Print the frame table a config would produce, without resampling. Use it to check a rotating plane (above all its time offset) before launching. |
@@ -374,6 +375,44 @@ python compare_output.py 3d_out/rho_b__run_3d_xz.h5 2d_out/rho_b__run_xz.h5
 On the production run above this gives a worst relative difference of
 **5×10⁻¹³** over 640 000 points (median ~10⁻¹⁵) — i.e. the two paths are the
 same calculation. Run it after touching the pipeline.
+
+### Spatial derivatives
+
+The optional `derivatives` block adds derivatives of any 3D field, with respect
+to the simulation coordinates x, y, z, as extra output variables:
+
+```yaml
+derivatives:
+  accuracy: 4                # centred stencils of order 2, 4 (default) or 6
+  fields:
+    Bx:  [x, y, z]           # -> dBx_dx, dBx_dy, dBx_dz
+    gxx: [x, y, z, xy, zz]   # ... and d2gxx_dxdy, d2gxx_dzdz
+```
+
+Each becomes an ordinary variable (`dBx_dx__<label>.h5`, same schema, plus
+`derivative_of` / `derivative_axes` / `derivative_accuracy` attributes), so
+nothing downstream changes. The derivative is computed **before**
+interpolation, on each component's native grid: the hyperslab read is widened by
+the stencil half-width, `derivatives_3d.differentiate` takes the centred
+difference over that block and trims it to where the full stencil fits, and the
+existing interpolation then samples the trimmed block. So the plane carries
+interpolated derivatives, never derivatives of interpolated data, a stencil
+never straddles two refinement levels, and normal derivatives come out exactly
+like in-plane ones. Quantities built from several derivatives (e.g. the
+field-line congruence invariants, which need ∂B and ∂γ) are assembled
+afterwards from these files.
+
+The ownership rule leaves every sample point at least `nghost − ½` cells inside
+its component's data. Accuracy 4 (half-width 2) fits in Carpet's usual 3 ghost
+zones, so with it the derivative variables use exactly the same level/component
+for every point as the plain ones do. A wider stencil (accuracy 6, or fewer
+ghost zones) makes each component claim a correspondingly smaller region; the
+next coarser level fills the band, and the run logs a warning.
+
+`derivatives_3d.py` itself is numpy-only and knows nothing about planes or
+postcactus — use it for any other differentiation of gridded 3D data. Each
+derivative re-reads its base field, so `[x, y, z]` of one field costs about
+three reads of it.
 
 ### Gotchas
 

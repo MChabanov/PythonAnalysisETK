@@ -181,6 +181,18 @@ interp_order: 1
 # Value for plane points no refinement level covers (outside the 3D domain).
 outside_value: 0.0
 
+# Reuse each AMR component's geometry (origin, spacing, shape, ghost zones)
+# across variables at the same iteration, instead of re-reading thousands of
+# HDF5 attributes for every slice. All grid functions share one grid hierarchy,
+# so this is exact; every component the plane hits is still checked against its
+# real attributes, and a variable that disagrees falls back to reading them (with
+# a warning). Pays off whenever a rank resamples several variables at the same
+# iteration - i.e. with resample_chunks > 1, or more variables than ranks.
+# ~1-2 MB of memory per cached iteration. Default: yes. The gain is modest
+# (~1 s per slice measured): the dominant cost of a slice is inflating the
+# whole gzip-chunked components the plane crosses, which this does not avoid.
+geometry_cache: yes
+
 # Output storage dtype. float32 halves file size; float64 preserves precision.
 dtype: float64
 
@@ -215,3 +227,30 @@ variables:
   - alp
   - w_lorentz
   - smallb2
+
+# SPATIAL DERIVATIVES ---------------------------------------------------------
+# Optional. Each requested derivative of a 3D field becomes one more output
+# variable, cut onto the plane exactly like the ones above (own file, same
+# schema). Derivatives are with respect to the SIMULATION coordinates x, y, z -
+# not the plane's u, v - so they combine directly with the Cartesian metric and
+# field components. They are taken BEFORE interpolation: each AMR component is
+# read with its hyperslab widened by the stencil, differentiated on its own grid
+# by centred finite differences, and only then interpolated onto the plane.
+#
+# Names: d<field>_d<axis> for first derivatives (dBx_dx), d2<field>_d<a>d<b>
+# for second ones (d2gxx_dxdy, d2gxx_dzdz). A field need not also appear under
+# `variables`. Cost: each derivative re-reads its field, so three derivatives of
+# Bx cost about three reads of Bx.
+#
+# derivatives:
+#   accuracy: 4           # order of the centred stencils: 2, 4 (default) or 6.
+#                         # 4 has a 2-cell half-width, which the usual 3 ghost
+#                         # zones accommodate exactly; 6 is wider than they
+#                         # allow, so the outermost half cell of each component
+#                         # is then filled from the next coarser level instead.
+#   fields:
+#     Bx:  [x, y, z]      # -> dBx_dx, dBx_dy, dBx_dz
+#     By:  [x, y, z]
+#     Bz:  [x, y, z]
+#     gxx: [x, y, z]      # each entry: axis letters, one per derivative order;
+#     # gxx: [xx, xy]     # second derivatives (at most 2 per axis) also work

@@ -265,9 +265,13 @@ class Backend(ABC):
         """
         if cfg["plane"] not in ("xy", "xz", "yz"):
             abort("plane must be one of xy, xz, yz (got %r)" % cfg["plane"])
+        if cfg.get("derivatives"):
+            abort("`derivatives` needs the 3D pipeline (resample_3d.py): a 2D "
+                  "slice has no data off the plane to take the normal "
+                  "derivative from")
 
-    def extra_output_attrs(self, cfg):
-        """Backend-specific HDF5 attributes for the output files.
+    def extra_output_attrs(self, cfg, var=None):
+        """Backend-specific HDF5 attributes for the output file of ``var``.
 
         Merged last by :func:`output_attrs`, so this may also override one of
         the common entries - e.g. the ``plane`` label of a 3D plane cut.
@@ -379,7 +383,7 @@ def output_attrs(backend, cfg, var):
         "resolution": resolution,
         "backend": backend.name,
     }
-    attrs.update(backend.extra_output_attrs(cfg))
+    attrs.update(backend.extra_output_attrs(cfg, var))
     return attrs
 
 
