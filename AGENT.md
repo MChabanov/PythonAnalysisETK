@@ -41,6 +41,33 @@ mpirun -mca pml cm -mca btl self,vader -mca mtl psm2 -x PSM2_MULTI_EP=0 \
     python ~/PythonAnalysisETK/Resample/resample_3d.py config.yaml
 ```
 
+### Choosing a partition: `debug` is the shared one
+
+The `short` partition named throughout this file **no longer exists**. As of
+2026-09-03 the partitions are `gp-default`, `gp-long`, `wl-default`, `wl-long`,
+`all-default`, `lm-largemem` and `debug`; a stale `--partition=short` is
+rejected at submit time with *"invalid partition specified"*.
+
+Which to pick is not just about the time limit:
+
+| | | |
+| - | - | - |
+| `gp-default` / `gp-long` / `wl-default` / `wl-long` | `OverSubscribe=EXCLUSIVE` | a job takes a **whole node**. `squeue` showing every node allocated therefore does *not* mean every core is busy - it means whole nodes are claimed, and nothing of yours starts until one frees. With the queue full of 20-day-limit jobs that is an unbounded wait. |
+| `debug` | `ExclusiveUser=NO`, `OverSubscribe=NO` | **multi-user**: jobs from different people share `lm-n0001` (48 cores, 12 h max), each getting its own CPUs. A short job schedules immediately alongside whatever else is running. |
+
+So the resample step - hours on 16 ranks - belongs on `gp-default`, and it is
+worth the wait. But the **frame/movie steps are minutes**, and queuing those
+behind a whole-node allocation is the wrong trade: send them to `debug`.
+Measured: the 100-frame `corotating_meridional_Bfield` render started within
+20 s and finished in about 30 s on 16 ranks, sharing the node with another
+user's `lm-largemem` job.
+
+Two courtesies, since the node is shared: do **not** pass `--exclusive`, and
+keep `--ntasks-per-node` modest. `debug` sets `DefMemPerCPU=2048`, so 16 ranks
+get 32 GB by default - ample for rendering, where a rank holds only a couple of
+800x800 float64 slices at a time, but something to raise explicitly if you ever
+run a memory-hungry step there.
+
 ### Three traps in batch scripts
 
 - **`$0` is not the script.** SLURM runs a spool copy, so `$0` is
@@ -104,7 +131,7 @@ output using the trajectory's **velocity** data.
 ```
 <sim>/3d_analysis/corotating_meridional/
 ├── Resample/config_..._3d_merid.yaml   the plane + grid spec (heavily commented)
-├── Resample/job.batch                  16 ranks, `short`, 5:45:00
+├── Resample/job.batch                  16 ranks, `gp-default`, 5:45:00
 └── Frames/                             make_frames.py + movie_config.yaml + job.batch
 ```
 
@@ -152,8 +179,9 @@ on one node of the 30M BBH production run:
 | frame rendering + mp4, 100 frames | a few minutes on 16 ranks |
 
 Budget generously: a cold single-rank estimate of ~50 s/slice suggested ~1.5 h
-per rank, and the real figure was lower — but the `short` partition's 6 h cap
-leaves little room to be wrong in the other direction.
+per rank, and the real figure was lower. This ran under the old `short`
+partition's 6 h cap; `gp-default` now allows 2 days, so the time limit is no
+longer the binding constraint — the wait for a free whole node is.
 
 ---
 
@@ -275,3 +303,124 @@ alongside is a reasonable compromise.
 - **The 2D analysis dirs' `job.batch` files predate §1** and assume the
   submitting shell has postcactus. They need the environment block before they
   can be rerun.
+
+---
+
+## 7. Field-line congruence diagnostics — where the work stands (2026-10-01)
+
+Goal: maps of the expansion Θ_B, shear Σ_B, twist Ω_B and curvature κ_B of the
+magnetic field-line congruence, `~/magnetic_field_line_congruence.tex`,
+"Practical evaluation" section. **Equation numbers:** the compiled manuscript's
+E74/E78/E79/E80 are eqs. 73/77/78/79 of the tex compiled standalone (one
+extra numbered equation precedes the section in the manuscript).
+
+### Directory structure
+
+```
+~/PythonAnalysisETK/Resample/              (repo, branch corot)
+├── derivatives_3d.py                      NEW: centred FD (1st/2nd, mixed;
+│                                          accuracy 2/4/6), stencil trimming,
+│                                          `derivatives:` config parsing. numpy only
+├── resample_3d_data_postcactus.py         `derivatives:` option + `geometry_cache`
+├── resample_common.py                     extra_output_attrs(cfg, var); 2D backends
+│                                          refuse `derivatives`
+├── config_example_3d.yaml, README.md      documented ("Spatial derivatives")
+
+A=/lagoon/michailchabanov/Analysis/BBH_production/inspiral_IGM_sameBHint_HHR_newcool_drift_mag_LorGrid_flux/3d_analysis
+$A/derivatives_xy/
+├── Resample/                              3D -> static xy plane, 800x800 over +-40 M
+│   ├── config_30M_HR_q1_flux_3d_xy.yaml   22 variables + 27 derivatives, accuracy 4,
+│   │                                      resample_chunks: 100
+│   ├── job.batch                          gp-default, 4 nodes x 25 ranks (job 7433)
+│   ├── simdir_cache_HHR_newcool_30M_flux_3d.pkl   copy of corotating_meridional's
+│   └── HR_newcool_30M_flux_resampled_3d_xy/       49 files, 100 its each, 21 GB:
+│         rho_b P eps lcool smallb2 vel_0..2 betax..z alp w_lorentz
+│         Bx By Bz gxx..gzz   dB{x,y,z}_d{x,y,z}   dg{xx..zz}_d{x,y,z}
+├── theta_sigma_omega_kappa/Frames/        BH1 movie (6 panels, 2x3)
+│   ├── make_frames.py                     congruence_scalars() = the tex recipe
+│   ├── movie_config.yaml                  40 input paths, scales, THETA_FORM
+│   ├── job.batch                          debug, 40 ranks, ~5 min
+│   ├── test_congruence_scalars.py         validation; must print ALL OK
+│   ├── README.md                          definitions, checks, colour choices
+│   ├── frames__HR_newcool_30M_flux_3d_xy/ PNGs + current movie (LINEAR scale)
+│   ├── ..._BH1_..._3d_xy__log.mp4         log scale, floor 1e-2
+│   └── ..._BH1_..._3d_xy__Theta_projector.mp4   first version (old Θ, log)
+└── theta_sigma_omega_kappa_BH2/Frames/    BH2 movie: same code, config differs
+                                           (BH: 2, log scale, floor 1e-1)
+```
+
+Panels: Θ_B, Σ_B, Ω_B / κ_B, σ = b²/(ρ₀h) + lines, B^z/|B| + lines. The last two
+copy `../2d_analysis/xy_sigma_BH1` and `xy_Bz_overnormB_BH1` (lines 1.15x
+thicker, lw 0.3795). Box: 20 M following the BH from the trajectory table.
+6 fps, because 3D output gives 100 frames against 397 for the 2D movies.
+
+### State
+
+- The repo changes are committed on `corot` as `adb9b7a` ("Resample spatial
+  derivatives from 3D data; cache component geometry"), not pushed.
+- `derivatives_3d.py` + the backend path: polynomials exact, convergence rates
+  2/4/6, synthetic multi-level AMR on a tilted plane exact to 1e-13, and on
+  real data the resampled ∂f equals a finite difference of the resampled f
+  bit-for-bit wherever one level owns the stencil (xz/yz test planes).
+- `geometry_cache` (default on): bit-identical output, but saves only ~1 s per
+  slice — see "Costs" below. Harmless; kept.
+- Θ_B is computed in the **divergence-free form** Θ_B = −ℓ^k ∂_k|B|/|B| (tex
+  eq. 33, `THETA_FORM: divfree`). The projector form P^ij𝓑_ij also carries the
+  data's centred-difference ∇·B (~2% of |∂B|), which does **not** shrink with
+  stencil order (2.6% → 2.1% → 2.0% at accuracy 2/4/6), so it is a fixed
+  ~25% pointwise bias in Θ. The divergence-free form is also ~30% less
+  stencil-sensitive. Θ_B stays the least robust scalar pointwise (90th-percentile
+  change ~25% between accuracy 4 and 6; Σ, Ω, κ change by 1–2%).
+
+### Rerunning
+
+```bash
+cd $A/derivatives_xy/Resample && sbatch job.batch          # ~50 min, 4 gp nodes
+cd $A/derivatives_xy/theta_sigma_omega_kappa/Frames && sbatch job.batch   # ~5 min
+cd $A/derivatives_xy/theta_sigma_omega_kappa_BH2/Frames && sbatch job.batch
+```
+
+Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
+`CONG_VMIN/VMAX`, `THETA_LINTHRESH/THETA_VMAX` (log), `CONG_LIN_VMAX`,
+`THETA_LIN_VMAX` (linear), `THETA_FORM` (divfree/projector), `BH`,
+`STREAM_*`. Typical values in the BH1 box: medians Σ 1.1, Ω 0.9, κ 0.5,
+|Θ| 0.25 /M; 95th percentiles 8.6 / 8.4 / 5.3 / 3.6; 99.5th 20–32.
+
+### Findings worth not rediscovering
+
+- **Costs.** Carpet stores each 3D component as **one gzip chunk**, so any
+  hyperslab read inflates the whole component. The log's "MiB read" counts only
+  the slab kept. At 100 ranks Lustre saturates: plain slices took ~100 s, only
+  ~2.2x the throughput of 16 ranks. Derivative slices took **8–10 s**, because
+  the same rank had just read the base field at the same iteration (page
+  cache). So list plain variables before their derivatives (the config does),
+  and set `resample_chunks` so that each rank handles one or a few iterations
+  of *every* variable (`resample_chunks: 100` for 100 iterations: rank r gets
+  iteration r of all 49). The real untried speedup: process levels fine to coarse and skip
+  components whose plane points finer levels already filled.
+- **2D cross-check of the xy run:** 99/100 iterations match `../2d_analysis/
+  xy_plane` to ≤5e-13 for all 22 plain variables. **it = 81920** (first output
+  after the Vista restart, 3240 components instead of 4608) differs for
+  evolved fields by up to 4e-5 of the max at 617 points on the level-6 edge;
+  metric agrees to 1e-13; raw Carpet data agree bit-for-bit. The 2D path gives
+  level-6 interpolation there, the 3D cut level 5. Cause not pinned down.
+- `compare_output.py` reports an **elementwise** relative difference, which
+  blows up at zero crossings (gxy, B). Normalise by the field's global maximum
+  instead before calling something a mismatch.
+- `lcool` is NaN everywhere in the xy output, 2D and 3D alike.
+- **YAML:** `1.0e2` parses as a string (YAML 1.1 wants `1.0e+2`). The movie
+  scripts now cast limits with float(); older BH1 configs got away with it.
+- Scratch test jobs must run from `/lagoon` — the session scratchpad is under
+  node-local `/tmp` (§1). sympy is not in `etk-analysis` (base Anaconda has it);
+  the congruence test is numerical and needs none.
+
+### Open items
+
+1. Push `corot` / open a PR when ready (`adb9b7a`, local only).
+2. Dimensionless diagnostics, deferred by request: e.g. Σ_B Δx (resolution),
+   (Σ²−Ω²)/(Σ²+Ω²) ∈ [−1, 1] (squeezing vs coiling), Σ_B/κ_B.
+3. Integrated shear along field lines (eq. 57) — needs field-line tracing.
+4. Fine-to-coarse component skipping in the 3D backend (measure first).
+5. The it = 81920 level-edge discrepancy, if it matters.
+6. `/lagoon/michailchabanov/scratch_theta_convergence/` (stencil-order test
+   resamples) can be deleted.
