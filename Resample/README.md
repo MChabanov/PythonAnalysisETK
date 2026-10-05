@@ -359,6 +359,36 @@ barely speed it up. Each variable logs its own figures on its first slice:
 well under 100% means the plane sticks out of the domain (those points get
 `outside_value`).
 
+The per-iteration times above are for files already in the page cache. A
+**cold** slice - the first touch of a variable's files at an iteration, which
+is every slice of a `resample_chunks` run - takes 40–70 s on one rank, and the
+data reads are only 6–8 s of it. The rest is per-file HDF5 metadata on Lustre,
+for the variable's 64 per-process files: parsing their tables of contents
+(14–34 s; the SimDir pickle holds the parsed TOC of only one file per restart),
+opening them (8–15 s) and the dataset lookups of the metadata pass (9–14 s).
+Walking the levels fine to coarse to skip components finer levels already
+cover was tried and does not help (see the backend's docstring, "Where a cold
+slice's time goes"). What does help is not re-parsing the TOCs:
+
+- **`share_tocs: yes`** (default). The files one process wrote into one output
+  directory hold the same datasets whatever the variable, so the TOCs a rank
+  parsed for one variable are handed to the next (`toc_share.py`) - after
+  checking, per variable and directory, that the file the iteration query
+  parsed for it has the identical TOC. A rank resampling several variables of
+  one directory (any `resample_chunks` run) parses one variable's TOCs instead
+  of every variable's. Bit-identical output; a shared TOC naming a dataset a
+  file lacks makes the slice be redone with the variable's own, with a warning.
+- **`toc_cache: <path>`** keeps them between runs: loaded at the start, the
+  newly parsed ones merged in at the end (~50 kB per output directory). Then
+  even the first variable at an iteration parses nothing. Point every 3D config
+  of a simulation at the same file.
+
+The log reports `tables of contents: N shared, M parsed` on each variable's
+first slice, and the totals at the end. Measured on cold files (one rank,
+compute node): −34% per slice for every variable after the first at an
+iteration (22.2 vs 33.6 s), −29% for the first one with `toc_cache` (25.4 vs
+35.8 s); output bit-identical.
+
 Because a 3D slice costs seconds rather than milliseconds, `resample_chunks` is
 worth much more here than for 2D — set it so that `variables × chunks` ≥ ranks.
 

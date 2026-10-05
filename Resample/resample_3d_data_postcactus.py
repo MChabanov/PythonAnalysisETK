@@ -91,24 +91,73 @@ is excluded from it for the rest of the run, and a warning is logged. Set
 
 Measured on the 30M BBH run (xy plane, 800x800, one rank): bit-identical output,
 ~1 s saved per slice once the files are in the page cache (4.2 -> 3.1 s), and
-no measurable gain on cold slices (35-120 s under load). The metadata pass is
-not what makes a cold slice expensive: Carpet stores every component as ONE
-gzip chunk, so reading even a thin hyperslab reads and inflates the whole
-component - the "MiB read" in the log counts only the slab kept.
+no measurable gain on cold slices (35-120 s under load). Carpet stores every
+component as ONE gzip chunk, so reading even a thin hyperslab reads and
+inflates the whole component - the "MiB read" in the log counts only the slab
+kept.
+
+Where a cold slice's time goes
+------------------------------
+Profiled on the same run (xy plane, one rank, 40-70 s per cold slice): the
+data reads are only 6-8 s. The rest is per-file metadata on Lustre, paid by
+every (variable, iteration) slice because each variable has its own 64
+per-process files per output directory:
+
+* 14-34 s parsing the files' tables of contents. The SimDir pickle carries the
+  parsed TOC of only the first file of each restart (all the iteration query
+  needs), so ``get_level_comps`` makes postcactus list every dataset name of
+  the other 63 - ~0.3 s per file, cold-Lustre latency, not an h5py
+  inefficiency (a single-pass ``links.iterate`` is no faster);
+* 8-15 s opening the 64 files (~0.15 s each);
+* 9-14 s looking up datasets by name for the metadata pass.
+
+Hence walking levels fine to coarse - skipping components whose points finer
+levels already own, and every level coarser than the first that covers the
+plane - does not pay: it was implemented and verified bit-identical (21
+slices, including derivatives, accuracy 6 and the co-rotating plane), and cut
+the datasets touched per xy slice by ~40%, but the ones it skips are the small
+coarse ones, and cold slices on compute nodes came out ~10% *slower* in 12 of
+15 pairs (2 of 2 faster on the login node) - presumably because the coarse-first
+walk lets Lustre readahead serve the later fine-level reads. What does pay is
+not re-parsing TOCs - next section.
+
+Shared tables of contents
+-------------------------
+The files one process wrote into one output directory hold the same datasets
+whatever the variable, so a TOC parsed for ``alp.xyz.file_12.h5`` serves
+``gxx.xyz.file_12.h5`` too. ``toc_share.TocShare`` keeps the TOCs a rank has
+parsed, keyed like the geometry cache by (directory, file suffix), and gives
+them to the files of the next variable - after checking, per variable and
+directory, that the file the iteration query parsed for it has the identical
+TOC (``share_tocs``, default yes). A rank resampling several variables at one
+iteration then parses one variable's TOCs instead of every variable's. With
+``toc_cache: <path>`` they are also kept between runs: loaded at the start,
+and the ones parsed are merged into the file at the end, so a later run
+parses none for directories it has seen. Output is bit-identical either way;
+should a shared TOC name a dataset a file lacks, the slice is redone with the
+variable's own TOCs and sharing stops for it in that directory.
+
+Measured (xy plane, one rank on a compute node, cold files, 6 + 5 pairs, all
+bit-identical to the production output): a variable after the first at an
+iteration took 22.2 s with shared TOCs against 33.6 s without (-34%; pairs
+0.51-0.85), and the first variable at an iteration 25.4 s with the TOCs from
+``toc_cache`` against 35.8 s (-29%; pairs 0.60-0.96).
 """
 
 import fnmatch
 import os
-import re
+import pickle
 
 import numpy as np
 from postcactus import grid_data as gd
 
-from resample_common import abort, grid_bounds, log, rank, run
+from resample_common import abort, comm, grid_bounds, log, rank, run
 from resample_2d_data_postcactus import PostcactusBackend
 from plane_geom import PlaneSpec
 import derivatives_3d
 import plane_motion
+import toc_share
+from toc_share import file_key as _file_key
 
 # Interpolation order -> ghost cells needed around the sampled region. Same map
 # postcactus uses in cactus_grid_h5.GridReader._read_sampled.
@@ -121,21 +170,6 @@ _SAMPLE_3D_NAMES = ("rho_b.xyz.h5", "rho_b.xyz.file_0.h5", "rho_b.file_0.h5")
 
 class _GeometryMismatch(Exception):
     """A component's real geometry differs from the cached one."""
-
-
-# The file-name part that does not depend on the variable (or group) name:
-# "Bx.xyz.file_12.h5" -> ".xyz.file_12.h5", "rho_b.h5" -> ".h5".
-_FILE_SUFFIX = re.compile(r"^.*?((?:\.xyz)?(?:\.file_\d+)?\.h5)$")
-
-
-def _file_key(h5file):
-    """Variable-independent identity of a 3D output file: (directory, suffix)."""
-    path = getattr(h5file, "_path", None)
-    if path is None:
-        return id(h5file)  # unknown reader: never shared between variables
-    head, base = os.path.split(path)
-    match = _FILE_SUFFIX.match(base)
-    return (head, match.group(1) if match else base)
 
 
 def _pack_geometry(geom):
@@ -188,7 +222,8 @@ class Postcactus3DBackend(PostcactusBackend):
         self._derivs = {}          # {output name: Derivative}, from the config
         self._geom_cache = {}      # {it: {(file key, level, comp): packed geometry}}
         self._uncacheable = set()  # fields whose geometry disagreed with the cache
-
+        self._tocs = None          # toc_share.TocShare, if share_tocs
+        self._toc_counts = [0, 0]  # TOCs [shared, parsed] by this rank
     # -- configuration -----------------------------------------------------
 
     def validate_config(self, cfg):
@@ -221,6 +256,11 @@ class Postcactus3DBackend(PostcactusBackend):
 
         cfg.setdefault("outside_value", 0.0)
         cfg.setdefault("geometry_cache", True)
+        cfg.setdefault("share_tocs", True)
+        cfg.setdefault("toc_cache", None)
+        if cfg["toc_cache"] and not cfg["share_tocs"]:
+            abort("toc_cache needs share_tocs: yes (it stores the shared tables "
+                  "of contents)")
 
         order = int(cfg["interp_order"])
         if order not in _STENCIL_HALO:
@@ -432,7 +472,45 @@ class Postcactus3DBackend(PostcactusBackend):
         # The 3D omni reader. Same object type as sd.grid.<plane> in the 2D
         # backend, so the inherited query/warm-state code applies unchanged.
         self._configure(cfg)
+        self._setup_tocs(cfg)
         return sim.grid.xyz
+
+    def _setup_tocs(self, cfg):
+        """Create the TOC share (and load its cache file), once per rank."""
+        if self._tocs is not None or not cfg.get("share_tocs", True):
+            return
+        self._tocs = toc_share.TocShare()
+        path = cfg.get("toc_cache")
+        if path:
+            try:
+                n = self._tocs.load(path)
+            except (OSError, ValueError, EOFError, pickle.UnpicklingError) as exc:
+                log("  WARNING: ignoring TOC cache %s: %s" % (path, exc))
+            else:
+                log("TOC cache %s: %d table(s) of contents loaded"
+                    % (path, n))
+
+    def finish(self, cfg):
+        """All ranks: report TOC sharing; merge the parsed TOCs into the cache."""
+        if self._tocs is None:
+            return
+        counts = comm.gather(self._toc_counts, root=0)
+        path = cfg.get("toc_cache")
+        parts = comm.gather(self._tocs.parsed(), root=0) if path else None
+        if rank != 0:
+            return
+        shared = sum(c[0] for c in counts)
+        parsed = sum(c[1] for c in counts)
+        log("Tables of contents: %d parsed, %d shared (%.0f%%)"
+            % (parsed, shared, 100.0 * shared / max(shared + parsed, 1)))
+        if path:
+            try:
+                dirs, files = toc_share.save(path, parts)
+            except (OSError, ValueError, EOFError, pickle.UnpicklingError) as exc:
+                log("  WARNING: could not update TOC cache %s: %s" % (path, exc))
+            else:
+                log("TOC cache %s: %d table(s) of contents in %d director(ies) "
+                    "added or refreshed" % (path, files, dirs))
 
     # A derivative variable has the iterations and the cached file state of
     # the field it is taken of; the reader only knows the field's name.
@@ -488,27 +566,38 @@ class Postcactus3DBackend(PostcactusBackend):
         args = (src, files, field, it, spec, u, v, xs, ys, zs, order, halo,
                 deriv, accuracy, fd_trim, report)
 
-        cache = None
-        if cfg.get("geometry_cache", True) and field not in self._uncacheable:
-            cache = self._geom_cache.setdefault(int(it), {})
+        tocs = self._tocs if cfg.get("share_tocs", True) else None
+        n_shared = tocs.prepare(field, files) if tocs is not None else 0
+        n_parsed = sum(f._toc is None for f in files)
         try:
-            stats = self._composite(out, cache, *args)
-        except _GeometryMismatch as exc:
-            self._uncacheable.add(field)
-            print("[rank %d] %s: WARNING component geometry differs from the "
-                  "cache (%s); %s is resampled without the geometry cache from "
-                  "now on" % (rank, var, exc, field), flush=True)
+            stats = self._composite_checked(out, cfg, var, field, it, args)
+        except KeyError as exc:
+            # h5py: a dataset some TOC lists is not in the file. Only ours to
+            # handle if the TOC was a shared one.
+            if tocs is None or not tocs.reject(field, files):
+                raise
+            print("[rank %d] %s: WARNING a shared table of contents does not "
+                  "match %s's files at it=%d (%s); %s parses its own in that "
+                  "directory from now on" % (rank, var, field, it, exc, field),
+                  flush=True)
             out.fill(float(cfg["outside_value"]))
-            stats = self._composite(out, None, *args)
+            n_parsed = sum(f._toc is None for f in files)
+            n_shared = 0
+            stats = self._composite_checked(out, cfg, var, field, it, args)
+        if tocs is not None:
+            tocs.contribute(field, files)
+        self._toc_counts[0] += n_shared
+        self._toc_counts[1] += n_parsed
 
         if report:
             self._reported.add(var)
             print("[rank %d] %s: plane touches %d of %d component(s) at it=%d, "
                   "%.1f MiB read, %.1f%% of the grid covered, geometry of %d "
-                  "from the cache"
+                  "from the cache, tables of contents: %d shared, %d parsed"
                   % (rank, var, stats["read"], stats["scanned"], it,
                      stats["cells"] * 8 / 2 ** 20,
-                     100.0 * stats["covered"].mean(), stats["cached"]),
+                     100.0 * stats["covered"].mean(), stats["cached"],
+                     n_shared, n_parsed),
                   flush=True)
             if stats["shrunk"]:
                 print("[rank %d] %s: WARNING the %d-cell stencil is wider than "
@@ -519,6 +608,21 @@ class Postcactus3DBackend(PostcactusBackend):
                       % (rank, var, fd_trim.max(), stats["shrunk"]),
                       flush=True)
         return out
+
+    def _composite_checked(self, out, cfg, var, field, it, args):
+        """:meth:`_composite`, with the geometry cache where it holds."""
+        cache = None
+        if cfg.get("geometry_cache", True) and field not in self._uncacheable:
+            cache = self._geom_cache.setdefault(int(it), {})
+        try:
+            return self._composite(out, cache, *args)
+        except _GeometryMismatch as exc:
+            self._uncacheable.add(field)
+            print("[rank %d] %s: WARNING component geometry differs from the "
+                  "cache (%s); %s is resampled without the geometry cache from "
+                  "now on" % (rank, var, exc, field), flush=True)
+            out.fill(float(cfg["outside_value"]))
+            return self._composite(out, None, *args)
 
     def _composite(self, out, cache, src, files, field, it, spec, u, v,
                    xs, ys, zs, order, halo, deriv, accuracy, fd_trim, report):

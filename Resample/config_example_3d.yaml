@@ -189,9 +189,33 @@ outside_value: 0.0
 # a warning). Pays off whenever a rank resamples several variables at the same
 # iteration - i.e. with resample_chunks > 1, or more variables than ranks.
 # ~1-2 MB of memory per cached iteration. Default: yes. The gain is modest
-# (~1 s per slice measured): the dominant cost of a slice is inflating the
-# whole gzip-chunked components the plane crosses, which this does not avoid.
+# (~1 s per slice measured): the dominant cost of a cold slice is opening the
+# variable's per-process files and parsing their tables of contents (TOCs) -
+# see share_tocs.
 geometry_cache: yes
+
+# Share the files' parsed tables of contents across variables. postcactus lists
+# every dataset name of a file to learn which (iteration, level, component) it
+# holds - ~0.3 s per file on Lustre, and a 3D variable has one file per MPI
+# process per output directory, of which the SimDir pickle keeps only one
+# parsed. But the files one process wrote into one directory hold the same
+# datasets whatever the variable, so a TOC parsed for one variable serves the
+# others. Shared only after checking, per variable and directory, that the
+# file the iteration query parsed has the identical TOC; output is
+# bit-identical either way, and a shared TOC that names a missing dataset makes
+# the slice be redone with the variable's own (with a warning). Pays off like
+# geometry_cache: whenever a rank resamples several variables of one output
+# directory. Default: yes.
+share_tocs: yes
+
+# Optionally keep the shared TOCs between runs: loaded from this file at the
+# start, and those parsed during the run are merged into it at the end (a few
+# kB per output file; one cache can serve every 3D analysis of a simulation, so
+# point all their configs at the same file). A later run then parses no TOC for
+# directories already in it - which also helps the first variable a rank reads
+# at an iteration, and runs with resample_chunks: 1, where sharing within a run
+# cannot. A missing file is an empty cache. Needs share_tocs. Default: none.
+toc_cache: null
 
 # Output storage dtype. float32 halves file size; float64 preserves precision.
 dtype: float64

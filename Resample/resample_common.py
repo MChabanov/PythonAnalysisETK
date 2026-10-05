@@ -300,6 +300,13 @@ class Backend(ABC):
         the chunk merge in the same way."""
         return {}
 
+    def finish(self, cfg):
+        """All ranks, after every variable is written: wrap up.
+
+        Collective - every rank calls it - so a backend may gather here, e.g.
+        to persist caches built up while resampling. Default: nothing.
+        """
+
     # -- required interface -------------------------------------------------
 
     @abstractmethod
@@ -661,6 +668,7 @@ def run(backend):
                 % (time.perf_counter() - t0))
         _resample_chunked(backend, plane_index, full_var_iters, coords, cfg, chunks)
 
+    backend.finish(cfg)
     comm.Barrier()
     log("Checkpoint End: all variables written to %s (total wall %.1f s)"
         % (cfg["output_dir"], time.perf_counter() - t_start))

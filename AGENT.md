@@ -306,7 +306,7 @@ alongside is a reasonable compromise.
 
 ---
 
-## 7. Field-line congruence diagnostics — where the work stands (2026-10-01)
+## 7. Field-line congruence diagnostics — where the work stands (2026-10-05)
 
 Goal: maps of the expansion Θ_B, shear Σ_B, twist Ω_B and curvature κ_B of the
 magnetic field-line congruence, `~/magnetic_field_line_congruence.tex`,
@@ -322,6 +322,10 @@ extra numbered equation precedes the section in the manuscript).
 │                                          accuracy 2/4/6), stencil trimming,
 │                                          `derivatives:` config parsing. numpy only
 ├── resample_3d_data_postcactus.py         `derivatives:` option + `geometry_cache`
+│                                          + `share_tocs`/`toc_cache`; docstring
+│                                          "Where a cold slice's time goes"
+├── toc_share.py                           NEW: TOCs shared across variables, and the
+│                                          `toc_cache` file (load / merge-save)
 ├── resample_common.py                     extra_output_attrs(cfg, var); 2D backends
 │                                          refuse `derivatives`
 ├── config_example_3d.yaml, README.md      documented ("Spatial derivatives")
@@ -332,10 +336,13 @@ $A/derivatives_xy/
 │   ├── config_30M_HR_q1_flux_3d_xy.yaml   22 variables + 27 derivatives, accuracy 4,
 │   │                                      resample_chunks: 100
 │   ├── job.batch                          gp-default, 4 nodes x 25 ranks (job 7433)
+│   ├── config_30M_HR_q1_flux_3d_xy_dalp.yaml   + d_k alpha only (same label/dir)
+│   ├── job_dalp.batch                     gp-default, 1 node x 25 ranks, 4.6 min (job 7522)
 │   ├── simdir_cache_HHR_newcool_30M_flux_3d.pkl   copy of corotating_meridional's
-│   └── HR_newcool_30M_flux_resampled_3d_xy/       49 files, 100 its each, 21 GB:
+│   └── HR_newcool_30M_flux_resampled_3d_xy/       52 files, 100 its each, ~22 GB:
 │         rho_b P eps lcool smallb2 vel_0..2 betax..z alp w_lorentz
 │         Bx By Bz gxx..gzz   dB{x,y,z}_d{x,y,z}   dg{xx..zz}_d{x,y,z}
+│         dalp_d{x,y,z}
 ├── theta_sigma_omega_kappa/Frames/        BH1 movie (6 panels, 2x3)
 │   ├── make_frames.py                     congruence_scalars() = the tex recipe
 │   ├── movie_config.yaml                  40 input paths, scales, THETA_FORM
@@ -345,8 +352,17 @@ $A/derivatives_xy/
 │   ├── frames__HR_newcool_30M_flux_3d_xy/ PNGs + current movie (LINEAR scale)
 │   ├── ..._BH1_..._3d_xy__log.mp4         log scale, floor 1e-2
 │   └── ..._BH1_..._3d_xy__Theta_projector.mp4   first version (old Θ, log)
-└── theta_sigma_omega_kappa_BH2/Frames/    BH2 movie: same code, config differs
-                                           (BH: 2, log scale, floor 1e-1)
+├── theta_sigma_omega_kappa_BH2/Frames/    BH2 movie: same code, config differs
+│                                          (BH: 2, log scale, floor 1e-1)
+└── ratios_current/Frames/                 BH1 movie (2x3): (S^2-O^2)/(S^2+O^2),
+    ├── make_frames.py                     S_B/k_B, |J|/|B| / rho_0, sigma + lines,
+    │                                      B^z/|B| (no lines). congruence_scalars
+    │                                      copied unchanged + current_density()
+    ├── movie_config.yaml                  44 input paths, measured ranges
+    ├── job.batch                          debug, 40 ranks, ~2 min (job 7523)
+    ├── test_congruence_scalars.py, test_current_density.py   both print ALL OK
+    ├── README.md                          definitions, units, identities, ranges
+    └── frames__HR_newcool_30M_flux_3d_xy/ 100 PNGs + ratios_current_BH1_...mp4
 ```
 
 Panels: Θ_B, Σ_B, Ω_B / κ_B, σ = b²/(ρ₀h) + lines, B^z/|B| + lines. The last two
@@ -356,8 +372,8 @@ thicker, lw 0.3795). Box: 20 M following the BH from the trajectory table.
 
 ### State
 
-- The repo changes are committed on `corot` as `adb9b7a` ("Resample spatial
-  derivatives from 3D data; cache component geometry"), not pushed.
+- The derivative code is committed on `corot` as `adb9b7a` and pushed
+  (`corot` = `origin/corot`); not merged into `main`.
 - `derivatives_3d.py` + the backend path: polynomials exact, convergence rates
   2/4/6, synthetic multi-level AMR on a tilted plane exact to 1e-13, and on
   real data the resampled ∂f equals a finite difference of the resampled f
@@ -378,6 +394,8 @@ thicker, lw 0.3795). Box: 20 M following the BH from the trajectory table.
 cd $A/derivatives_xy/Resample && sbatch job.batch          # ~50 min, 4 gp nodes
 cd $A/derivatives_xy/theta_sigma_omega_kappa/Frames && sbatch job.batch   # ~5 min
 cd $A/derivatives_xy/theta_sigma_omega_kappa_BH2/Frames && sbatch job.batch
+cd $A/derivatives_xy/Resample && sbatch job_dalp.batch     # ~5 min, 1 gp node
+cd $A/derivatives_xy/ratios_current/Frames && sbatch job.batch            # ~2 min
 ```
 
 Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
@@ -396,14 +414,62 @@ Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
   cache). So list plain variables before their derivatives (the config does),
   and set `resample_chunks` so that each rank handles one or a few iterations
   of *every* variable (`resample_chunks: 100` for 100 iterations: rank r gets
-  iteration r of all 49). The real untried speedup: process levels fine to coarse and skip
-  components whose plane points finer levels already filled.
+  iteration r of all 49). **Where a cold slice's time goes** (profiled, one
+  rank, 40–70 s): data reads only 6–8 s; parsing the 64 per-process files'
+  tables of contents 14–34 s (the pickle holds the parsed TOC of only one file
+  per restart, so every slice re-lists ~200 dataset names per file at ~1.4 ms
+  each - cold-Lustre latency; a single-pass `links.iterate` is no faster);
+  opening them 8–15 s; dataset lookups 9–14 s.
+- **Fine-to-coarse skipping was tried and reverted (2026-10-05).** Walking
+  levels finest first, skipping components whose points finer levels own and
+  every level coarser than the first that covers the plane: bit-identical on 21
+  slices (plain, derivatives, accuracy 6, co-rotating plane), ~40% fewer
+  datasets touched per xy slice (levels 0–3 = 2048 of 4608 never scanned) -
+  but those are the small coarse ones, and cold slices on `debug` came out
+  ~10% *slower* in 12 of 15 pairs (faster in 2 of 2 on the login node);
+  reversing the in-level access order made it worse still. Presumably the
+  coarse-first walk lets Lustre readahead serve the later fine-level reads. The
+  version is not in git.
+- **Shared tables of contents (2026-10-05, `toc_share.py`)** - what did pay.
+  The files one process wrote into one output directory hold the same
+  datasets whatever the variable, so `share_tocs` (default on) hands a rank's
+  parsed TOCs to the next variable, keyed by (directory, file suffix), after
+  checking per variable and directory that the query-parsed file's TOC is
+  identical. `toc_cache: <path>` persists them (~50 kB per output directory;
+  merged at the end of each run). Measured, one rank, cold, all bit-identical:
+  a variable after the first at an iteration 22.2 vs 33.6 s (−34%), the first
+  one with the cache 25.4 vs 35.8 s (−29%); end-to-end 4 ranks x 4 variables:
+  75% of TOCs shared in the first run, 100% (0 parsed) in a rerun with the
+  cache. Safety net, tested: a corrupted shared TOC is refused by the check,
+  and one forced past it makes the slice be redone with the variable's own
+  TOCs (KeyError fallback, warning) - output still identical. The
+  `derivatives_xy` configs now point at `$A/toc_cache_HHR_newcool_30M_flux_3d.pkl`
+  (empty until the next run); other 3D configs can share it.
 - **2D cross-check of the xy run:** 99/100 iterations match `../2d_analysis/
   xy_plane` to ≤5e-13 for all 22 plain variables. **it = 81920** (first output
   after the Vista restart, 3240 components instead of 4608) differs for
   evolved fields by up to 4e-5 of the max at 617 points on the level-6 edge;
   metric agrees to 1e-13; raw Carpet data agree bit-for-bit. The 2D path gives
-  level-6 interpolation there, the 3D cut level 5. Cause not pinned down.
+  level-6 interpolation there, the 3D cut level 5. **Resolved (2026-10-05):**
+  traced to that 2D output step handling ghost zones differently, not to the
+  pipeline. (`cctk_nghostzones` is 3 there in both 2D and 3D files, as
+  elsewhere, so the difference does not show in the metadata. 81920 is the only
+  frame taken from `Vista-Output/output-0007-Vista`: 45 files, 360 components
+  per level instead of 64 x 512.)
+- **B^i is Gaussian** (b = B/√4π): with the full metric, `smallb2/(B²/W² +
+  (v·B)²)` = 1/4π to 1e-4 (frames 10/50/90). So Ampère's law is
+  J = ε D(αB)/(4πα) exactly as in Gaussian units.
+- **Reflection symmetry about z = 0:** ∂_z γ_ij and ∂_z α are ≤ 4e-15 on the xy
+  plane (z-aligned spins, planar orbit).
+- **|J|/|B| is not independent of the congruence:** 4πJ/|B| = (ℓ·curl ℓ)ℓ +
+  ℓ × (κ − D_⊥ln(α|B|)), so J_∥/|B| = ±Ω_B/2π and |J|/|B| =
+  [4Ω_B² + |κ_B − D_⊥ln(α|B|)|²]^½/4π (verified to 1e-13 in
+  `test_current_density.py`). In the BH1 box the field-aligned part carries a
+  median 61% of J². The ∂α term matters only next to the hole (median 0.05%,
+  up to 2x).
+- Σ_B/κ_B and (Σ²−Ω²)/(Σ²+Ω²) are pixel-noisy (comparable grid-scale
+  quantities); nothing is smoothed. In the BH1 box shear beats twist on 60% of
+  pixels and curvature on 78%.
 - `compare_output.py` reports an **elementwise** relative difference, which
   blows up at zero crossings (gxy, B). Normalise by the field's global maximum
   instead before calling something a mismatch.
@@ -416,11 +482,15 @@ Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
 
 ### Open items
 
-1. Push `corot` / open a PR when ready (`adb9b7a`, local only).
-2. Dimensionless diagnostics, deferred by request: e.g. Σ_B Δx (resolution),
-   (Σ²−Ω²)/(Σ²+Ω²) ∈ [−1, 1] (squeezing vs coiling), Σ_B/κ_B.
+1. Open a PR `corot` → `main` when ready (`corot` is pushed).
+2. Dimensionless diagnostics: (Σ²−Ω²)/(Σ²+Ω²) and Σ_B/κ_B are done
+   (`ratios_current`, BH1); Σ_B Δx (resolution) not done. BH2 version if wanted.
 3. Integrated shear along field lines (eq. 57) — needs field-line tracing.
-4. Fine-to-coarse component skipping in the 3D backend (measure first).
-5. The it = 81920 level-edge discrepancy, if it matters.
-6. `/lagoon/michailchabanov/scratch_theta_convergence/` (stencil-order test
-   resamples) can be deleted.
+4. ~~3D backend speed: stop re-parsing TOCs~~ done 2026-10-05 (`share_tocs`,
+   `toc_cache`; −29 to −34% per cold slice). Left: the 64 file opens per
+   variable per slice (8–15 s) and the first variable's metadata pass at an
+   iteration (geometry, 9–14 s) - the geometry cache could be persisted the
+   same way as the TOCs. Fine-to-coarse skipping: tried, no gain (Findings).
+5. ~~it = 81920 discrepancy~~ resolved (Findings).
+6. ~~scratch_theta_convergence~~ and the empty `out_bench_a/` in the repo:
+   deleted 2026-10-05.
