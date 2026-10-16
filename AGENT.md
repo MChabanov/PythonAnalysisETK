@@ -8,7 +8,9 @@ job succeeded where the usual tools are missing, how to verify a moving-plane
 run after the fact, and the movie-encoding recipes.
 
 Written after the co-rotating meridional run described in §3, which is the
-worked example the rest of the file refers to.
+worked example §1-6 refer to; §7-8 record the field-line congruence work and
+the single-snapshot cuts built on it, §9 what is still open, §10 the planes
+about each hole of the precessing 3C 186 run.
 
 ---
 
@@ -55,20 +57,23 @@ Which to pick is not just about the time limit:
 | `gp-default` / `gp-long` / `wl-default` / `wl-long` | `OverSubscribe=EXCLUSIVE` | a job takes a **whole node**. `squeue` showing every node allocated therefore does *not* mean every core is busy - it means whole nodes are claimed, and nothing of yours starts until one frees. With the queue full of 20-day-limit jobs that is an unbounded wait. |
 | `debug` | `ExclusiveUser=NO`, `OverSubscribe=NO` | **multi-user**: jobs from different people share `lm-n0001` (48 cores, 12 h max), each getting its own CPUs. A short job schedules immediately alongside whatever else is running. |
 
-So the resample step - hours on 16 ranks - belongs on `gp-default`, and it is
-worth the wait. But the **frame/movie steps are minutes**, and queuing those
-behind a whole-node allocation is the wrong trade: send them to `debug`.
-Measured: the 100-frame `corotating_meridional_Bfield` render started within
-20 s and finished in about 30 s on 16 ranks, sharing the node with another
-user's `lm-largemem` job.
+So a full resample - 100 iterations, hours on 16 ranks - belongs on
+`gp-default`, and it is worth the wait. But the **frame/movie steps are
+minutes**, and queuing those behind a whole-node allocation is the wrong trade:
+send them to `debug`. Measured: the 100-frame `corotating_meridional_Bfield`
+render started within 20 s and finished in about 30 s on 16 ranks, sharing the
+node with another user's `lm-largemem` job. The same goes for a **one-iteration
+resample** (§8): 21 variables on 21 ranks took 75 s cold, 11 s with a warm
+`toc_cache`.
 
 Two courtesies, since the node is shared: do **not** pass `--exclusive`, and
 keep `--ntasks-per-node` modest. `debug` sets `DefMemPerCPU=2048`, so 16 ranks
-get 32 GB by default - ample for rendering, where a rank holds only a couple of
-800x800 float64 slices at a time, but something to raise explicitly if you ever
-run a memory-hungry step there.
+get 32 GB by default - ample for rendering a box, where a rank holds only a
+couple of 800x800 float64 slices at a time, but not for the congruence scalars
+on a **whole** 800x800 plane (~1.3 GB per rank before the figure is drawn): the
+`*_box40` jobs ask for `--mem-per-cpu=4G`.
 
-### Three traps in batch scripts
+### Four traps in batch scripts
 
 - **`$0` is not the script.** SLURM runs a spool copy, so `$0` is
   `/var/spool/slurmd/jobNNNNN/slurm_script` and `dirname "$0"` is meaningless.
@@ -79,6 +84,11 @@ run a memory-hungry step there.
 - **A queued job holds a snapshot of the script.** SLURM copies it at submit
   time, so editing the file does not change an already-queued job — cancel and
   resubmit.
+- **`srun python` breaks anything that imports mpi4py** (every
+  `make_frames.py`): OpenMPI here has no SLURM PMI support, so `MPI_Init`
+  aborts under a direct `srun` launch. Plain `python` inside an sbatch script
+  works; for a quick one-off, `sbatch --wait -p debug -n 1 --wrap "..."`.
+  Scripts that do not import mpi4py (`plot_snapshot.py`) are fine under srun.
 
 ### Judging success without `sacct`
 
@@ -306,7 +316,7 @@ alongside is a reasonable compromise.
 
 ---
 
-## 7. Field-line congruence diagnostics — where the work stands (2026-10-05)
+## 7. Field-line congruence diagnostics — where the work stands (2026-10-06)
 
 Goal: maps of the expansion Θ_B, shear Σ_B, twist Ω_B and curvature κ_B of the
 magnetic field-line congruence, `~/magnetic_field_line_congruence.tex`,
@@ -317,7 +327,7 @@ extra numbered equation precedes the section in the manuscript).
 ### Directory structure
 
 ```
-~/PythonAnalysisETK/Resample/              (repo, branch corot)
+~/PythonAnalysisETK/Resample/              (repo, branch main)
 ├── derivatives_3d.py                      NEW: centred FD (1st/2nd, mixed;
 │                                          accuracy 2/4/6), stencil trimming,
 │                                          `derivatives:` config parsing. numpy only
@@ -331,6 +341,7 @@ extra numbered equation precedes the section in the manuscript).
 ├── config_example_3d.yaml, README.md      documented ("Spatial derivatives")
 
 A=/lagoon/michailchabanov/Analysis/BBH_production/inspiral_IGM_sameBHint_HHR_newcool_drift_mag_LorGrid_flux/3d_analysis
+$A/toc_cache_HHR_newcool_30M_flux_3d.pkl   shared TOC cache of every 3D config here
 $A/derivatives_xy/
 ├── Resample/                              3D -> static xy plane, 800x800 over +-40 M
 │   ├── config_30M_HR_q1_flux_3d_xy.yaml   22 variables + 27 derivatives, accuracy 4,
@@ -354,26 +365,40 @@ $A/derivatives_xy/
 │   └── ..._BH1_..._3d_xy__Theta_projector.mp4   first version (old Θ, log)
 ├── theta_sigma_omega_kappa_BH2/Frames/    BH2 movie: same code, config differs
 │                                          (BH: 2, log scale, floor 1e-1)
-└── ratios_current/Frames/                 BH1 movie (2x3): (S^2-O^2)/(S^2+O^2),
-    ├── make_frames.py                     S_B/k_B, |J|/|B| / rho_0, sigma + lines,
-    │                                      B^z/|B| (no lines). congruence_scalars
-    │                                      copied unchanged + current_density()
-    ├── movie_config.yaml                  44 input paths, measured ranges
-    ├── job.batch                          debug, 40 ranks, ~2 min (job 7523)
-    ├── test_congruence_scalars.py, test_current_density.py   both print ALL OK
-    ├── README.md                          definitions, units, identities, ranges
-    └── frames__HR_newcool_30M_flux_3d_xy/ 100 PNGs + ratios_current_BH1_...mp4
+├── ratios_current/Frames/                 BH1 movie (2x3): (S^2-O^2)/(S^2+O^2),
+│   ├── make_frames.py                     S_B/k_B, |J|/|B| / rho_0, sigma + lines,
+│   │                                      B^z/|B| (no lines). congruence_scalars
+│   │                                      copied unchanged + current_density()
+│   ├── movie_config.yaml                  44 input paths, measured ranges
+│   ├── job.batch                          debug, 40 ranks, ~2 min (job 7523)
+│   ├── test_congruence_scalars.py, test_current_density.py   both print ALL OK
+│   ├── README.md                          definitions, units, identities, ranges
+│   └── frames__HR_newcool_30M_flux_3d_xy/ 100 PNGs + ratios_current_BH1_...mp4
+├── ratios_current_smoothed/Frames/        the same movie, every derivative field
+│                                          Gaussian-smoothed (SMOOTH_SIGMA 0.2 M, full
+│                                          plane) before computing; test_smoothing.py
+│                                          (sigma 0 == ratios_current bit-for-bit); job 7528
+├── theta_sigma_omega_kappa_box40/Frames/  the linear-scale congruence movie and the
+└── ratios_current_smoothed_box40/Frames/  smoothed ratios movie on the WHOLE plane,
+                                           [-40,40]^2 M fixed (BH: null, BOX_CENTER,
+                                           HALF_WIDTH 40); colour ranges re-measured
+                                           there; test_box.py (cut to the BH1 box ==
+                                           the BH1 movie bit-for-bit); 4G/rank on
+                                           debug; jobs 7533/7534
 ```
 
-Panels: Θ_B, Σ_B, Ω_B / κ_B, σ = b²/(ρ₀h) + lines, B^z/|B| + lines. The last two
-copy `../2d_analysis/xy_sigma_BH1` and `xy_Bz_overnormB_BH1` (lines 1.15x
-thicker, lw 0.3795). Box: 20 M following the BH from the trajectory table.
-6 fps, because 3D output gives 100 frames against 397 for the 2D movies.
+Panels of the congruence movie: Θ_B, Σ_B, Ω_B / κ_B, σ = b²/(ρ₀h) + lines,
+B^z/|B| + lines. The last two copy `../2d_analysis/xy_sigma_BH1` and
+`xy_Bz_overnormB_BH1` (lines 1.15x thicker, lw 0.3795). Box: 20 M following the
+BH from the trajectory table (the `*_box40` movies: the whole plane, fixed). 6
+fps, because 3D output gives 100 frames against 397 for the 2D movies.
 
 ### State
 
-- The derivative code is committed on `corot` as `adb9b7a` and pushed
-  (`corot` = `origin/corot`); not merged into `main`.
+- The derivative code is committed on `corot` as `adb9b7a`, the TOC sharing as
+  `b5e8960`; `corot` was merged into `main` on 2026-10-16 (PR #3, `9558ba2`).
+  Since then only this file has changed in the repo - everything in §7-8 after
+  `b5e8960` lives in the analysis directories, not in git.
 - `derivatives_3d.py` + the backend path: polynomials exact, convergence rates
   2/4/6, synthetic multi-level AMR on a tilted plane exact to 1e-13, and on
   real data the resampled ∂f equals a finite difference of the resampled f
@@ -392,17 +417,22 @@ thicker, lw 0.3795). Box: 20 M following the BH from the trajectory table.
 
 ```bash
 cd $A/derivatives_xy/Resample && sbatch job.batch          # ~50 min, 4 gp nodes
+cd $A/derivatives_xy/Resample && sbatch job_dalp.batch     # ~5 min, 1 gp node
 cd $A/derivatives_xy/theta_sigma_omega_kappa/Frames && sbatch job.batch   # ~5 min
 cd $A/derivatives_xy/theta_sigma_omega_kappa_BH2/Frames && sbatch job.batch
-cd $A/derivatives_xy/Resample && sbatch job_dalp.batch     # ~5 min, 1 gp node
 cd $A/derivatives_xy/ratios_current/Frames && sbatch job.batch            # ~2 min
+cd $A/derivatives_xy/ratios_current_smoothed/Frames && sbatch job.batch   # ~2 min
+cd $A/derivatives_xy/theta_sigma_omega_kappa_box40/Frames && sbatch job.batch
+cd $A/derivatives_xy/ratios_current_smoothed_box40/Frames && sbatch job.batch
+# each Frames/ directory: python test_*.py -> ALL OK (inside an sbatch job, §1)
 ```
 
 Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
 `CONG_VMIN/VMAX`, `THETA_LINTHRESH/THETA_VMAX` (log), `CONG_LIN_VMAX`,
-`THETA_LIN_VMAX` (linear), `THETA_FORM` (divfree/projector), `BH`,
-`STREAM_*`. Typical values in the BH1 box: medians Σ 1.1, Ω 0.9, κ 0.5,
-|Θ| 0.25 /M; 95th percentiles 8.6 / 8.4 / 5.3 / 3.6; 99.5th 20–32.
+`THETA_LIN_VMAX` (linear), `THETA_FORM` (divfree/projector), `BH`
+(1/2, or null with `BOX_CENTER`), `HALF_WIDTH`, `SMOOTH_SIGMA`, `STREAM_*`.
+Typical values in the BH1 box: medians Σ 1.1, Ω 0.9, κ 0.5, |Θ| 0.25 /M; 95th
+percentiles 8.6 / 8.4 / 5.3 / 3.6; 99.5th 20–32.
 
 ### Findings worth not rediscovering
 
@@ -442,9 +472,10 @@ Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
   75% of TOCs shared in the first run, 100% (0 parsed) in a rerun with the
   cache. Safety net, tested: a corrupted shared TOC is refused by the check,
   and one forced past it makes the slice be redone with the variable's own
-  TOCs (KeyError fallback, warning) - output still identical. The
-  `derivatives_xy` configs now point at `$A/toc_cache_HHR_newcool_30M_flux_3d.pkl`
-  (empty until the next run); other 3D configs can share it.
+  TOCs (KeyError fallback, warning) - output still identical. Every 3D config
+  here points at `$A/toc_cache_HHR_newcool_30M_flux_3d.pkl`; the first run to
+  use it was the single-snapshot xz cut of 2026-10-06 (§8), after which the
+  next cut of that snapshot parsed 0 TOCs and took 11 s instead of 75 s.
 - **2D cross-check of the xy run:** 99/100 iterations match `../2d_analysis/
   xy_plane` to ≤5e-13 for all 22 plain variables. **it = 81920** (first output
   after the Vista restart, 3240 components instead of 4608) differs for
@@ -468,8 +499,23 @@ Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
   median 61% of J². The ∂α term matters only next to the hole (median 0.05%,
   up to 2x).
 - Σ_B/κ_B and (Σ²−Ω²)/(Σ²+Ω²) are pixel-noisy (comparable grid-scale
-  quantities); nothing is smoothed. In the BH1 box shear beats twist on 60% of
-  pixels and curvature on 78%.
+  quantities); `ratios_current` smooths nothing. In the BH1 box shear beats
+  twist on 60% of pixels and curvature on 78%.
+- **Smoothing the derivatives** (`ratios_current_smoothed`): a Gaussian of
+  σ = 0.2 M cuts neighbouring-pixel sign flips of (Σ²−Ω²)/(Σ²+Ω²) from 32% to
+  17%; wider barely helps (14% at 0.5 M) but keeps eroding the current
+  (median |J|/|B| 0.28 → 0.18 → 0.11). Pixel values change by ~50%: the
+  unsmoothed ones are grid-scale-dominated. Shear still beats twist on 58%,
+  curvature on 73%. The ~1% residual dotted lines come partly from field
+  reversals (low |B|) and the unsmoothed B in ℓ = B/|B|.
+- **Whole plane vs the BH1 box** (`*_box40`): Θ_B, Σ_B, Ω_B, κ_B and |J|/|B|
+  are ~3x smaller over [-40,40]^2 (95th percentiles |Θ| 1.06, Σ 2.7, Ω 2.6,
+  κ 1.65; |J|/|B| median 0.056 vs 0.16), so the BH1 colour limits leave half
+  the plane in the bottom 3% of the scale - the box40 movies use 2.5 / ±1 and
+  [1e-3, 1]. The ratios are distributed as around BH1 (shear beats twist on
+  60%, curvature on 74%); smoothing changes them by a median ~20% there (~50%
+  in the BH1 box). A full-plane frame takes ~6 s and ~1.3 GB to compute,
+  30-50 s to render on one rank.
 - `compare_output.py` reports an **elementwise** relative difference, which
   blows up at zero crossings (gxy, B). Normalise by the field's global maximum
   instead before calling something a mismatch.
@@ -480,17 +526,293 @@ Movie knobs live in `movie_config.yaml`: `CONG_SCALE` (log/linear),
   node-local `/tmp` (§1). sympy is not in `etk-analysis` (base Anaconda has it);
   the congruence test is numerical and needs none.
 
-### Open items
+### The xz counterpart: `derivatives_xz` (2026-10-07)
 
-1. Open a PR `corot` → `main` when ready (`corot` is pushed).
-2. Dimensionless diagnostics: (Σ²−Ω²)/(Σ²+Ω²) and Σ_B/κ_B are done
-   (`ratios_current`, BH1); Σ_B Δx (resolution) not done. BH2 version if wanted.
+The linear congruence movie and the ratios/current movies (unsmoothed and
+smoothed) on the plane **through BH1, normal −y, following it**:
+y = y_BH1(t), axes (x − x_BH1, z), ±10 M, all 100 3D outputs.
+
+```
+$A/derivatives_xz/
+├── Resample/
+│   ├── config_30M_HR_q1_flux_3d_xz_BH1.yaml   trajectory plane, origin bh1, normal
+│   │                                      [0,-1,0], u_axis x; +-20 M, 401x401
+│   │                                      (0.1 M); 21 vars + d_k of alp, B^i,
+│   │                                      gamma_ij (30); resample_chunks: 100
+│   ├── job.batch                          gp-default, 4 nodes x 25, 12.4 min (job 7563)
+│   └── HR_newcool_30M_flux_resampled_3d_xz_BH1/   51 files, 100 its, 4.6 GB
+├── theta_sigma_omega_kappa/Frames/        the xy movie's make_frames.py with the
+│   │                                      physics unchanged; box about bh1_uv
+│   │                                      (no trajectory table), lines (u.B, v.B)
+│   ├── movie_config.yaml                  limits re-measured: [0, 2.5], +-1,
+│   │                                      sigma [1e-4, 1e3]
+│   ├── job.batch                          gp-default, 1 node x 32 ranks (job 7565)
+│   ├── test_congruence_scalars.py         copied; ALL OK
+│   ├── check_intersection.py (+ .out)     vs the xy movie's data on the shared
+│   │                                      line z = 0 through BH1; ALL OK
+│   └── frames__HR_newcool_30M_flux_3d_xz_BH1/   100 PNGs + ..._3d_xz_BH1.mp4
+├── ratios_current/Frames/                 the xy ratios movie, same geometry edits;
+│   │                                      |J|/|B| [3e-3, 3], rho_0 [1e-9, 1e-2],
+│   │                                      sigma [1e-4, 1e3], S/k [0.1, 10] kept
+│   ├── check_intersection.py (+ .out)     alpha, d_k alpha (d_y alpha normal to
+│   │                                      the cut), J^i/|B|, the ratios; ALL OK
+│   ├── test_congruence_scalars.py, test_current_density.py   ALL OK
+│   └── job.batch                          gp-default, 32 ranks (job 7568)
+├── ratios_current_smoothed/Frames/        + derivatives smoothed, sigma 0.2 M in
+│                                          (x, z); test_smoothing.py ALL OK (job 7569)
+└── Bz_Bphi/Frames/                        2x2: B^z/|B|, B^phi/|B| in the xy plane
+                                           (derivatives_xy data) and in the cut,
+                                           lines on all four; phi about BH1's spin
+                                           axis (vertical through BH1); new
+                                           make_frames.py, test_components.py
+                                           ALL OK (job 7583)
+```
+
+- **The whole 100-iteration resample took 12.4 min** (xy run: 48 min, before
+  TOC sharing and on a ±40 M plane): 95% of TOCs shared, and derivative slices
+  ~2 s once a rank has opened an iteration's files (the first variable ~140 s
+  cold).
+- **Frame stride 11 aliases with the orbit** (11 x 51.2 M = 563 M ≈ half the
+  ~1077 M period): frames 0, 11, ..., 99 all have BH1 near y = 0. Irrelevant
+  for the xy box, but a plane with a fixed normal turns relative to the binary,
+  so for it sample every frame or a stride of 5.
+- **Comparing two planes on their shared line separates the derivative
+  conventions sharply only for smooth fields.** The metric's derivatives,
+  ∂_y γ_ij included (normal to the cut, in the xy plane), beat a mirrored cut
+  and a cut with ∂/∂(u, v, n) in place of ∂/∂(x, y, z) by 3x10³–2x10⁴. The B
+  derivatives and the scalars, which vary on the grid scale, manage only
+  2–10x - a 10x bar fails for them although their medians are 3.4–5.5x below
+  the row-to-row variation. Components that vanish on z = 0 by symmetry
+  (d_z γ_xx, d_x γ_zz, ...) need an absolute round-off test, not one relative
+  to the row variation.
+- **The cut is 4–10x quieter than the xy BH1 box** (medians Σ 0.10, Ω 0.22,
+  κ 0.16, |Θ| 0.12 /M; 95th percentiles 2.4 / 2.4 / 1.1 / 0.75): it runs
+  through the funnel and corona, where the field is ordered. σ > 10 on 48% of
+  the box (max 889). Hence the `*_box40` limits, and the snapshot σ range.
+- **The cut is twist- and curvature-dominated** (the funnel): shear beats
+  twist on 35% of pixels and curvature on 44% (xy box 60% / 78%); |J|/|B| ~6x
+  weaker (median 0.042 /M); ρ₀ down to ~2e-9 in the funnel. Smoothing at
+  0.2 M halves the sign flips of (Σ²−Ω²)/(Σ²+Ω²) here too (18% → 8%; xy
+  32% → 16%). On the spin axis κ_B dips (straight field line), so Σ_B/κ_B
+  shows a thin line at u = 0.
+- **Funnel winding** (`Bz_Bphi`): in the cut B^φ < 0 above the equator and
+  > 0 below at every frame (median 96% of funnel pixels, |x − x_BH1| < 3 M,
+  2 < |z| < 10 M), B^z/|B| median 0.80 - the trailing toroidal field of an
+  upward field on a hole spinning about +z (BH1's spin is along +z, a1x = a1y
+  = 0). B^φ is NaN on the cut's axis column (grey line).
+- **A norm is a weak yardstick for the derivative convention:** |J|/|B| beat
+  the wrong-convention cut by only 1.9x (mostly twist here, |J_∥| = Ω_B/2π),
+  the signed J^i/|B| by 3.1–4.6x, ∂_y α by 1.6x10⁴. Test signed components.
+
+---
+
+## 8. Single-snapshot cuts through BH1 (t = 3020.8 M, 2026-10-06)
+
+One 3D output, iteration 241664 (frame 59 of `derivatives_xy`), cut along
+planes through BH1 and plotted in boxes centred on it. The recipe generalises
+to any snapshot and body.
+
+```
+$A/single_snapshot_BH1_3020/                         README.md has the details
+├── Resample/
+│   ├── config_30M_HR_q1_flux_3d_xz_BH1_3020.yaml    xz through BH1: normal -y,
+│   │                                                u_axis x; +-20 M, 400x400;
+│   │                                                21 standard vars (no lcool)
+│   ├── job.batch                                    debug, 21 ranks, 75 s cold
+│   ├── config_30M_HR_q1_flux_3d_xzrot_m45_BH1_3020.yaml   the same cut turned
+│   │                                                -45 deg about z: normal
+│   │                                                [-1,-1,0], u_axis [1,-1,0]
+│   ├── job_xzrot_m45.batch                          11 s (warm toc_cache)
+│   ├── config_..._xzrot_m45_BH1_3020_derivs.yaml    + d_k alp, B^i, gamma_ij
+│   │                                                (30 files, same label/dir), 11 s
+│   └── HR_newcool_30M_flux_resampled_3d_{xz,xzrot_m45}_BH1_3020/
+└── Plot/
+    ├── plot_snapshot.py          rho_0 | sigma + lines | B^z/|B|, row 1 xy (frame
+    │                             59 of derivatives_xy, cropped about BH1), row 2
+    │                             the cut (CUT_DIR); field lines (u.B, v.B) from
+    │                             the file's plane axes
+    ├── plot_config_7M.yaml       +-7 M, lines 1.2x thicker (0.4554), density 6.0
+    ├── plot_config_xzrot_m45_7M.yaml   ... with the rotated cut
+    ├── check_intersection.py     the cut vs xy on their shared line -> ALL OK
+    └── ratios/                   the ratios figure ((S^2-O^2)/(S^2+O^2), S_B/k_B,
+                                  |J|/|B|, rho_0, sigma + lines, B^z/|B|) entirely
+                                  in the rotated cut, +-7 M, smoothed + unsmoothed:
+                                  make_frames.py of ratios_current_smoothed_box40
+                                  run on one frame (+ OUT_NAME/OUT_EXTS, plane
+                                  axes); test_cut_derivatives.py
+```
+
+### Cutting a plane through a body at one time
+
+```yaml
+plane:
+  kind: trajectory          # positions from the run's own trajectory table
+  file: auto
+  time_offset: auto
+  origin: bh1
+  normal: [0.0, -1.0, 0.0]  # xz; for xz turned by -45 deg about z: [-1, -1, 0]
+  u_axis: x                 #                                     and [1, -1, 0]
+iteration_min: 241664       # = iteration_max: one iteration
+iteration_max: 241664
+```
+
+The output stores `bh1_position`, `plane_u_axis`/`plane_v_axis` per iteration,
+so the plot script places the xy crop and projects B without any manual AST_t0
+bookkeeping.
+
+- **A trajectory plane's v axis is n × u**, and the normal's sign is kept as
+  given: `normal: y`, `u_axis: x` puts -z up. Pick the normal so that n × u
+  is +z (`[0, -1, 0]` for xz). `inspect_plane.py ... --times 3020.8 3020.8 1`
+  shows the frame in seconds, before any data is read. Static planes do not
+  have this problem: they keep the 2D (x, z) convention.
+- **Derivatives in a tilted cut** are still w.r.t. the simulation x, y, z (the
+  invariants do not care). Checked on the rotated cut: (∂_x f − ∂_y f)/√2 and
+  ∂_z f match centred differences of f along u and z to ~1e-5 of the max
+  (metric, lapse); a wrong convention is off by ~1e-2.
+- **Two planes on different grids never agree exactly on their shared line.**
+  Judge them against how much the field changes between neighbouring grid rows:
+  both cuts agree with the xy plane to within that on 92–97% of the line (99.5%
+  for γ_xx), worst within 1 M of the puncture; the mirrored cut misses by
+  13–16,000x more (`check_intersection.py`).
+- **Streamplot `density` is relative to the data's extent, not the axes'.**
+  Crop every panel's data to the box before drawing lines, or a panel fed a
+  larger array (the ±20 M cut in a ±7 M box) gets sparser lines than its
+  neighbours.
+- **`srun` vs mpi4py**: `plot_snapshot.py` runs under `srun`, `ratios/
+  make_frames.py` does not (§1, fourth trap).
+
+### What the snapshot shows
+
+- **σ in the meridional cuts reaches ~900** in the polar funnel (95th
+  percentile 166), so the movies' σ scale [1e-4, 10] saturates a third of the
+  panel; all snapshot figures use [1e-4, 1e3]. ρ₀ uses the xy_plane /
+  corotating_meridional range [1e-10, 5e-2].
+- **Twist and curvature dominate the rotated cut**, unlike the equatorial
+  plane: the funnel (|u| ≲ 2) is (Σ²−Ω²)/(Σ²+Ω²) ≈ −1 with Σ_B/κ_B < 1, its
+  sheath shear-dominated, the disk mixed. Smoothed, shear beats twist on 40%
+  of the ±7 M box and curvature on 39% - against 58% and 73% in the smoothed
+  BH1-box movie (unsmoothed: 41% / 47% here, 60% / 78% there). Smoothing
+  (σ = 0.2 M) removes the speckle, not the pattern.
+- At ±7 M the 0.1 M sampling (140 samples across) shows as blocks. The AMR
+  near the hole is probably finer than that (not checked) - see §9 item 5.
+
+### Rerunning
+
+```bash
+S=$A/single_snapshot_BH1_3020
+cd $S/Resample && sbatch job.batch                   # xz, ~75 s cold
+sbatch job_xzrot_m45.batch && sbatch job_xzrot_m45_derivs.batch   # rotated, ~11 s each
+cd $S/Plot && python plot_snapshot.py                # +-20 M, xz   (~40 s, 1 core;
+python plot_snapshot.py plot_config_7M.yaml          #  srun -p debug is fine)
+python plot_snapshot.py plot_config_xzrot_m45_7M.yaml
+python check_intersection.py && python check_intersection.py plot_config_xzrot_m45_7M.yaml
+cd ratios && sbatch --wait -p debug -n 1 --mem=8G --wrap "source ~/anaconda3/etc/profile.d/conda.sh && \
+  conda activate etk-analysis && python make_frames.py ratios_config.yaml && \
+  python make_frames.py ratios_config_unsmoothed.yaml && python test_cut_derivatives.py"
+```
+
+### The BH2 counterpart: `single_snapshot_BH2_4403` (t = 4403.2 M, 2026-10-07)
+
+The same figures around BH2 at iteration 352256 (frame 86): the ±20 M and ±7 M
+snapshot figures and the ratios figure (smoothed and unsmoothed). The cut is
+the **coordinate plane y = 0**, not a plane through the hole and not a rotated
+cut. At this time the binary lies almost along x, with BH2 at
+(14.7806, −0.2183, 0), so y = 0 passes 0.218 M from both holes. README.md has
+the details.
+
+- **A fixed plane that still records the bodies:** use `kind: trajectory` with
+  `origin: [0, 0, 0]`, `normal: [0, -1, 0]`, `u_axis: x`. The frame is the
+  static xz plane, but the files carry `bh*_position` and `bh*_uv`. The box
+  centre is then `bh2_uv`, not (0, 0). `plot_snapshot.py` there has a `BODY`
+  setting and crops the cut about `<BODY>_uv`, which is (0, 0) for a cut
+  through the hole, so it also works for BH1. `check_intersection.py` takes
+  the shared line from the cut's `plane_origin`.
+- **Use the 2D grid when the plane is a 2D-output plane.** The cut is
+  ±40 M at 800 × 800, the grid of `2d_analysis/xz_plane`, so it can be checked
+  against the simulation's own 2D output (`check_2d_xz.py`): all 15 shared
+  variables agree to ≤1.3e-13 of their maximum. Both boxes about BH2 fit
+  inside it.
+- One gp-default node (it was idle) runs both resample configs in one job: 81 s
+  for the plain variables cold, then 12 s for the 30 derivatives with a warm
+  `toc_cache`.
+- The scratchpad `/tmp` is node-local, so an `sbatch -o` or script path there
+  fails on a compute node. Stage throwaway files under `/lagoon`.
+- Results: the BH1 colour scales fit unchanged (σ max 889). The funnel is
+  twist- and curvature-dominated, as around BH1. Smoothed, shear beats twist
+  on 42% of the ±7 M box and curvature on 46%.
+
+---
+
+## 10. Planes about each hole of a precessing binary (3C 186 LR, 2026-10-08)
+
+`/lagoon/michailchabanov/Analysis/BBH_production/K-configs-LR/3C_186_LR/3d_analysis/rho_BH_planes/`
+(README.md has the details): `rho_b` in the xz plane through each hole, the
+plane through each hole **perpendicular to its spin** (turning as the spin
+precesses), and the xy plane through each hole (z = z_BH(t)), all ±10 M; the
+meridional plane through both holes and z
+(v = z, the holes moving within it) and the orbital plane (normal L̂, inertial
+in-plane axes), both ±40 M; a 2 x 2 movie plus one movie per plane, one colour
+scale.
+Trajectory `flip_20M_3C186_prod.h5` - spins nearly in the orbital plane
+(tilted up to ~117° from z), precessing, orbit not planar.
+
+- **A trajectory table can merge inside the 3D output.** Here the holes
+  coincide at t = 17456 M while 3D output runs to 18074 M; the pipeline refuses
+  a trajectory plane once the separation is 0 (even with `normal:` given), so
+  set `iteration_max` to the last output before it. In the last outputs
+  before that the table's spins jump to the remnant's (tilt 76° → 13°).
+- **The spin plane's in-plane axes come from a plane module**: `normal: spin1`
+  with `u_axis: module` and `u(t) = ẑ × ŝ(t)`, so v = n × u is the projected
+  +z and the plane is seen from the spin's north pole. The module imports
+  `plane_motion.Trajectory` (on `sys.path` when run by `resample_3d.py`) so
+  that u is interpolated exactly as the normal. A fixed `u_axis` axis cannot
+  do this: the normal precesses all round z.
+- **Choosing a moving plane's in-plane axes with a module.** The same trick
+  sets any frame the presets lack: the meridional plane (`second_vector:
+  meridional`) with `origin: module` = the COM at z = 0 and `u_axis: module` =
+  the horizontal part of d gives v = z exactly, so the holes move within the
+  plane instead of being pinned to v = 0 by `u_axis: separation`. For a plane
+  that must *not* co-rotate, `normal: orbital` with `u_axis: x` keeps u as
+  close to x as the precessing plane allows and the binary orbits in it.
+- **Pipeline flaw: the normal's sign-continuity fix mirrors undersampled
+  planes.** `_make_normal_continuous` flips n whenever consecutive normals are
+  > 90° apart. That is right for a slowly turning plane, wrong for one turned
+  by more than 90° between outputs: a plane holding the separation does that
+  once the orbital period drops below ~4x the 3D cadence (here 12 of 340
+  steps, up to 159°), and v = n × u then comes out as −z on stretches of
+  frames (7 here). The data are right, the orientation mixed; the movie's
+  `make_frames.py` turns those frames over (v → −v). Not fixed in
+  `plane_motion.py` - see §9.
+- **Cost on this LR run** (64 files per variable per iteration, like the HHR
+  run): one variable x 341 iterations, 801² samples, on 128 ranks: 6.6 min with
+  cold TOCs, then 46-65 s per further plane with every TOC in `toc_cache`; the
+  meridional plane on 32 `debug` ranks, 3.4 min.
+
+---
+
+## 9. Open items
+
+1. ~~Open a PR `corot` → `main`~~ merged 2026-10-16 (PR #3, `9558ba2`).
+2. Dimensionless diagnostics: (Σ²−Ω²)/(Σ²+Ω²) and Σ_B/κ_B are done -
+   `ratios_current` (BH1), `ratios_current_smoothed`, the whole-plane
+   `ratios_current_smoothed_box40`, the rotated cut at t = 3020.8 (§8), and
+   the xz plane about BH2 at t = 4403.2 (§8). Σ_B Δx (resolution) not done.
+   BH2 versions of the movies if wanted. The xz-through-BH1 plane
+   (`derivatives_xz`, §7) has the congruence movie and both ratios movies.
 3. Integrated shear along field lines (eq. 57) — needs field-line tracing.
 4. ~~3D backend speed: stop re-parsing TOCs~~ done 2026-10-05 (`share_tocs`,
    `toc_cache`; −29 to −34% per cold slice). Left: the 64 file opens per
    variable per slice (8–15 s) and the first variable's metadata pass at an
    iteration (geometry, 9–14 s) - the geometry cache could be persisted the
-   same way as the TOCs. Fine-to-coarse skipping: tried, no gain (Findings).
-5. ~~it = 81920 discrepancy~~ resolved (Findings).
-6. ~~scratch_theta_convergence~~ and the empty `out_bench_a/` in the repo:
+   same way as the TOCs. Fine-to-coarse skipping: tried, no gain (§7 Findings).
+5. Single-snapshot cuts at finer sampling (e.g. 0.025-0.05 M over ±7 M, both
+   planes, the xy one resampled anew rather than cropped): offered, not done.
+   Each cut is a ~1 min `debug` job with the warm `toc_cache`.
+6. ~~it = 81920 discrepancy~~ resolved (§7 Findings).
+7. ~~scratch_theta_convergence~~ and the empty `out_bench_a/` in the repo:
    deleted 2026-10-05.
+8. `plane_motion._make_normal_continuous` should not flip a normal that turned
+   by more than 90° because the plane did (§10): e.g. keep the sign of a
+   reference direction (n_raw itself for `second_vector` planes) and warn,
+   rather than flipping v. Until then, check `plane_v_axis` of any plane
+   turning > 90° per output.
