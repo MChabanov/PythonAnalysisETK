@@ -269,3 +269,19 @@ class PlaneSpec(object):
         if i1 <= i0 or j1 <= j0:
             return None
         return i0, i1, j0, j1
+
+    def windows(self, x0, x1, u, v):
+        """Index windows of the ``(u, v)`` grid that can lie in the box [x0, x1].
+
+        The interface the 3D backend culls with, shared with
+        :class:`~sphere_geom.SphereSpec`: a list of index tuples into the
+        output array (here at most one, from :meth:`uv_window`), empty when the
+        box cannot hold a sample point.
+        """
+        if not self.intersects_box(x0, x1):
+            return []
+        window = self.uv_window(x0, x1, u, v)
+        if window is None:
+            return []
+        i0, i1, j0, j1 = window
+        return [(slice(i0, i1), slice(j0, j1))]

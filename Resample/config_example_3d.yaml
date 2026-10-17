@@ -181,6 +181,11 @@ interp_order: 1
 # Value for plane points no refinement level covers (outside the 3D domain).
 outside_value: 0.0
 
+# Add the output variable refinement_level: the refinement level that supplied
+# each point (-1 where none does). Reads component metadata only, never field
+# data. Default: no (for spheres, resample_sphere.py, the default is yes).
+refinement_level: no
+
 # Reuse each AMR component's geometry (origin, spacing, shape, ghost zones)
 # across variables at the same iteration, instead of re-reading thousands of
 # HDF5 attributes for every slice. All grid functions share one grid hierarchy,

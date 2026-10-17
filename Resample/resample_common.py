@@ -307,6 +307,29 @@ class Backend(ABC):
         to persist caches built up while resampling. Default: nothing.
         """
 
+    def coordinates(self, cfg):
+        """The coordinate datasets of every output file, ``{name: 1D array}``.
+
+        Default: the plane's ``x``/``y`` axes, evenly spaced over the config's
+        ``grid`` box. A backend sampling another surface returns its own (the
+        sphere backend: ``x`` = theta, ``y`` = phi, plus ``radius``).
+        """
+        resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
+        return {
+            "x": np.linspace(min_corner[0], max_corner[0], resolution[0]),
+            "y": np.linspace(min_corner[1], max_corner[1], resolution[1]),
+        }
+
+    def slice_shape(self, cfg):
+        """Shape of the array :meth:`read_slice` returns for one iteration.
+
+        Default ``(nx, ny)`` from ``grid.resolution``. Any number of
+        dimensions is allowed; the output is chunked per 2D sheet (the last
+        two axes), so reading one sheet at one time touches one chunk.
+        """
+        resolution, _, _ = grid_bounds(cfg["grid"])
+        return tuple(int(n) for n in resolution)
+
     # -- required interface -------------------------------------------------
 
     @abstractmethod
@@ -359,7 +382,8 @@ class Backend(ABC):
 
     @abstractmethod
     def read_slice(self, plane_index, var, it, cfg):
-        """Read+resample one iteration of ``var`` and return a 2D ndarray."""
+        """Read+resample one iteration of ``var``; return an ndarray of shape
+        :meth:`slice_shape` (2D for a plane)."""
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +418,20 @@ def output_attrs(backend, cfg, var):
     return attrs
 
 
+def slice_layout(backend, cfg):
+    """``(slice shape, chunk shape within a slice)`` of the ``data`` dataset.
+
+    One chunk per 2D sheet - the last two axes - of one iteration: the dataset
+    chunks are ``(1, nx, ny)`` for a plane, the original layout, and
+    ``(1, 1, ntheta, nphi)`` for several sheets per iteration (a sphere's
+    radii), so one sheet at one time is still a single chunk read. Shared by
+    the writer and the merge, whose verbatim chunk copy relies on both using
+    the same chunks.
+    """
+    shape = tuple(int(n) for n in backend.slice_shape(cfg))
+    return shape, (1,) * (len(shape) - 2) + shape[-2:]
+
+
 def process_variable(backend, plane_index, var, iters, times, coords, cfg,
                      out_path=None, write_meta=True):
     """Resample the given iterations of one variable and stream them into HDF5.
@@ -402,8 +440,7 @@ def process_variable(backend, plane_index, var, iters, times, coords, cfg,
     attributes). Chunked resampling writes partial files with ``write_meta`` off
     (only ``data``/``iterations``/``times``); the merge step adds coords + attrs.
     """
-    resolution, _, _ = grid_bounds(cfg["grid"])
-    nx, ny = resolution
+    shape, chunk = slice_layout(backend, cfg)
     out_dtype = np.dtype(cfg["dtype"])
 
     if out_path is None:
@@ -419,12 +456,12 @@ def process_variable(backend, plane_index, var, iters, times, coords, cfg,
     with h5py.File(out_path, "w") as h5:
         dset = h5.create_dataset(
             "data",
-            shape=(n_iter, nx, ny),
+            shape=(n_iter,) + shape,
             dtype=out_dtype,
             compression=compression,
             compression_opts=comp_opts,
             # Chunk per-slice so reads of a single time are cheap.
-            chunks=(1, nx, ny),
+            chunks=(1,) + chunk,
         )
 
         timing = {"read": 0.0, "write": 0.0}
@@ -450,8 +487,8 @@ def process_variable(backend, plane_index, var, iters, times, coords, cfg,
         for name, values in backend.per_iteration_data(cfg, var, iters).items():
             h5.create_dataset(name, data=np.asarray(values))
         if write_meta:
-            h5.create_dataset("x", data=coords[0])
-            h5.create_dataset("y", data=coords[1])
+            for name, values in coords.items():
+                h5.create_dataset(name, data=values)
             h5.attrs.update(output_attrs(backend, cfg, var))
 
     return out_path, n_iter, timing
@@ -620,11 +657,7 @@ def run(backend):
     t_start = time.perf_counter()
 
     # --- Coordinate axes for the resampling grid (identical on every rank) ---
-    resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
-    coords = (
-        np.linspace(min_corner[0], max_corner[0], resolution[0]),
-        np.linspace(min_corner[1], max_corner[1], resolution[1]),
-    )
+    coords = backend.coordinates(cfg)
 
     # --- Phase 1: acquire the (cold) SimDir on rank 0 ---
     sim_cold = _acquire_cold_simdir(backend, cfg)
@@ -855,11 +888,12 @@ def _merge_variable(backend, var, coords, cfg, chunks):
     """Concatenate a variable's chunk partials into its final file, then delete
     the partials.
 
-    The partials and the final file share dtype, chunk shape (one slice per
-    chunk) and compression - they are all created from the same config - so each
-    slice's chunk is copied *verbatim* with ``read_direct_chunk`` /
-    ``write_direct_chunk``: the compressed bytes are relocated without
-    decompress/recompress or a numpy round-trip, one chunk in memory at a time.
+    The partials and the final file share dtype, chunk shape (one 2D sheet per
+    chunk, see :func:`slice_layout`) and compression - they are all created
+    from the same config - so each chunk is copied *verbatim* with
+    ``read_direct_chunk`` / ``write_direct_chunk``: the compressed bytes are
+    relocated without decompress/recompress or a numpy round-trip, one chunk in
+    memory at a time.
     The iteration/time indices are read in the same pass, so each partial is
     opened only once.
     """
@@ -869,8 +903,10 @@ def _merge_variable(backend, var, coords, cfg, chunks):
         log("  WARNING: no chunks found to merge for %r" % var)
         return
 
-    resolution, _, _ = grid_bounds(cfg["grid"])
-    nx, ny = resolution
+    shape, chunk = slice_layout(backend, cfg)
+    # Chunk offsets within one slice: one per 2D sheet, i.e. just (0, 0) for a
+    # plane and (k, 0, 0) for sheet k of a stack.
+    sheets = [idx + (0, 0) for idx in np.ndindex(*shape[:-2])]
     out_dtype = np.dtype(cfg["dtype"])
     compression = "gzip" if cfg["compression_level"] else None
     comp_opts = int(cfg["compression_level"]) if cfg["compression_level"] else None
@@ -880,9 +916,9 @@ def _merge_variable(backend, var, coords, cfg, chunks):
     extra_parts = {}          # any further per-iteration dataset, in part order
     with h5py.File(final_path, "w") as h5:
         dset = h5.create_dataset(
-            "data", shape=(0, nx, ny), maxshape=(None, nx, ny), dtype=out_dtype,
-            compression=compression, compression_opts=comp_opts,
-            chunks=(1, nx, ny),
+            "data", shape=(0,) + shape, maxshape=(None,) + shape,
+            dtype=out_dtype, compression=compression, compression_opts=comp_opts,
+            chunks=(1,) + chunk,
         )
         offset = 0
         for p in parts:
@@ -891,9 +927,10 @@ def _merge_variable(backend, var, coords, cfg, chunks):
                 n = src.shape[0]
                 dset.resize(offset + n, axis=0)
                 for i in range(n):  # verbatim chunk copy, bounded memory
-                    filter_mask, raw = src.id.read_direct_chunk((i, 0, 0))
-                    dset.id.write_direct_chunk((offset + i, 0, 0), raw,
-                                               filter_mask=filter_mask)
+                    for sheet in sheets:
+                        filter_mask, raw = src.id.read_direct_chunk((i,) + sheet)
+                        dset.id.write_direct_chunk((offset + i,) + sheet, raw,
+                                                   filter_mask=filter_mask)
                 iters_parts.append(part["iterations"][:])
                 times_parts.append(part["times"][:])
                 # Anything else in the partial is per-iteration too (the plane
@@ -910,8 +947,8 @@ def _merge_variable(backend, var, coords, cfg, chunks):
                           data=np.concatenate(times_parts).astype(np.float64))
         for name, pieces in extra_parts.items():
             h5.create_dataset(name, data=np.concatenate(pieces))
-        h5.create_dataset("x", data=coords[0])
-        h5.create_dataset("y", data=coords[1])
+        for name, values in coords.items():
+            h5.create_dataset(name, data=values)
         h5.attrs.update(output_attrs(backend, cfg, var))
 
     for p in parts:

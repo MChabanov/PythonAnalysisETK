@@ -4,19 +4,22 @@ Resample slices from Einstein Toolkit simulations onto a fixed regular grid and
 store them as self-describing HDF5 files — one per variable — for fast
 downstream analysis.
 
-There are **two pipelines**, sharing one config schema, one MPI structure and
+There are **three pipelines**, sharing one config schema, one MPI structure and
 one on-disk schema:
 
 | Pipeline | Launcher | Reads | Use when |
 | -------- | -------- | ----- | -------- |
 | **2D** | `resample_2d.py` | the 2D slices Carpet already wrote (`*.xy.h5` …) | you want an xy/xz/yz cut — much cheaper |
 | **3D → plane** | `resample_3d.py` | the full 3D output (`*.xyz.h5`, `*.file_*.h5`) | you want **any other plane**, given by a normal vector |
+| **3D → sphere** | `resample_sphere.py` | the full 3D output | you want **spheres** of given radii on a uniform (θ, φ) grid, fixed or following a hole |
 
 Because they write the same schema, `read_data.py` and
-`../Frames/make_frames.py` read either without knowing which produced the file.
+`../Frames/make_frames.py` read either plane pipeline's files without knowing
+which produced them; a sphere file is the same schema with `x`/`y` = θ/φ and,
+for several radii, one more axis (see [Sampling spheres](#sampling-spheres-out-of-the-3d-output)).
 The 2D pipeline has two interchangeable backends — **postcactus** (the original
-library) and **kuibit** (its actively-maintained successor); the 3D pipeline
-currently has postcactus only.
+library) and **kuibit** (its actively-maintained successor); the 3D pipelines
+currently have postcactus only.
 
 ## Files
 
@@ -35,6 +38,12 @@ currently has postcactus only.
 | `resample_common.py`            | The whole backend-agnostic pipeline: MPI/config, pickle cache, serial + parallel query, warm-state gather, HDF5 streaming (`run()`), and the `Backend` interface. |
 | `config_example.yaml`           | Documented template config (2D); copy and edit per sim. |
 | `config_example_3d.yaml`        | Documented template config (3D → plane).              |
+| `resample_sphere.py`            | Sphere launcher — same dispatch, sphere backends.      |
+| `resample_sphere_data_postcactus.py` | `Postcactus3DSphereBackend` — subclasses the 3D backend; only the sampled surface, the output layout and the attributes differ. |
+| `sphere_geom.py`                | `SphereSpec`: the (θ, φ) grid, the sphere's frame, its sample points, and the culling (shell test + cap windows) that keeps 3D reads small. numpy only. |
+| `sphere_tools.py`               | Read sphere output (`load_sphere`, always `(n_iter, n_radii, nθ, nφ)`), unit vectors r̂/θ̂/φ̂, exact cell areas, √γ. |
+| `config_example_sphere.yaml`    | Documented template config (3D → sphere).             |
+| `test_sphere_geom.py`           | Unit tests for `sphere_geom.py` (brute-force culling check); `python test_sphere_geom.py` → ALL OK. |
 | `read_data.py`                  | Helpers to read the HDF5 output back into numpy.        |
 | `compare_output.py`             | Diff two output files — used to cross-check the 3D path against the 2D one. |
 
@@ -456,6 +465,89 @@ three reads of it.
   data, not the pipeline. `iteration_stride` is rarely needed.
 - `interp_order` accepts 0 (nearest) and 1 (linear) as in 2D; 2–5 select spline
   interpolation of that order.
+
+### Which level supplied each point (`refinement_level`)
+
+```yaml
+refinement_level: yes     # default no for planes, yes for spheres
+```
+
+adds the output variable `refinement_level` (`refinement_level__<label>.h5`,
+same schema): the refinement level whose component supplied each sample point,
+or −1 where none does. It comes from the same component walk with the field
+reads left out — component metadata only — so it costs a fraction of a
+variable. It is mapped from the files of the first variable (all grid
+functions share one hierarchy) and reflects the ownership of plain variables; a
+derivative wider than the ghost zones claims slightly less (see above).
+
+## Sampling spheres out of the 3D output
+
+`resample_sphere.py` samples the 3D output on spheres: a uniform (θ, φ) grid
+at one or several radii about a centre, each point interpolated from the finest
+refinement level that covers it. It is a thin subclass of the 3D plane backend,
+so everything in the previous section — culling, hyperslab reads, ownership,
+derivatives, `geometry_cache`, `share_tocs`/`toc_cache`, chunks and merge —
+applies unchanged, and the SimDir pickle and TOC cache of a run's other 3D
+analyses can be reused. See `config_example_sphere.yaml`.
+
+```yaml
+sphere:
+  radius: 3.0              # or several, increasing: [2.0, 3.0, 5.0]
+  resolution: [300, 600]   # n_theta, n_phi
+  centre: bh1              # [x, y, z] (fixed, default origin) | bh1 | bh2 | com | midpoint | module
+  pole: z                  # x | y | z | [a, b, c] (fixed, default z) | spin1 | spin2 | orbital | module
+  phi_zero: x              # optional: x | y | z | [a, b, c] | separation | spin1 | spin2 | module
+```
+
+- **Grid.** θ is cell-centred, `θ_j = (j + ½) π / n_θ`, so no point sits on a
+  pole (where a row would be `n_φ` copies of one point and θ̂, φ̂ are
+  undefined); `φ_k = 2π k / n_φ`, periodic, no duplicate endpoint. The spacing
+  is `r π / n_θ` in θ and `2π r / n_φ` on the equator — match it to the `dx` of
+  the level that covers the sphere (`n_θ ≈ π r / dx`, `n_φ = 2 n_θ`); the log
+  prints it for every radius, and `refinement_level` (on by default) shows
+  which level that is, point by point.
+- **Frame.** θ from the pole, φ from `phi_zero` towards `pole × phi_zero`
+  (right-handed). Without `phi_zero`, the coordinate axis least aligned with the
+  pole (x for a pole along z).
+- **Fixed or moving.** Fixed values make a fixed sphere. Anything that follows
+  the binary (`bh1`, `com`, `spin1`, `orbital`, `separation` …) makes the frame
+  trajectory-driven exactly like a `kind: trajectory` plane (`file`,
+  `time_offset`, default `auto`, same caveats): the sphere's centre, pole and
+  φ = 0 *are* a plane's origin, normal and u axis, built by `plane_motion` per
+  iteration, made continuous and checked before any data is read. `module`
+  values come from a Python module as for an analytic plane — `origin(t, it)`,
+  `normal(t, it)` (the pole), `u_axis(t, it)` (φ = 0).
+
+**Several radii, one file.** All radii are sampled in one pass: each component
+is read once for every radius that crosses it, and the per-file metadata that
+dominates a cold slice is paid once per (variable, iteration), not per radius.
+They share one file per variable, `data[iteration, radius, θ, φ]`, chunked one
+`(θ, φ)` sheet per (iteration, radius) — so reading one radius at one time
+touches exactly the bytes a file of its own would, and the merge still copies
+chunks verbatim. With one radius the layout is the plane's,
+`data[iteration, θ, φ]`.
+
+| Dataset / attribute | Shape | |
+| ------------------- | ----- | - |
+| `data` | `(n_iter, n_θ, n_φ)` or `(n_iter, n_radii, n_θ, n_φ)` | the field; attribute `layout` says which |
+| `x`, `y`, `radius` | `(n_θ,)`, `(n_φ,)`, `(n_radii,)` | θ, φ in radians; the radii |
+| `sphere_centre`, `sphere_pole`, `sphere_phi_zero` | attributes `(3,)`, or `(n_iter, 3)` datasets when moving | the frame |
+| `bh1_position`, `bh2_position`, `separation` | `(n_iter, 3)`, `(n_iter,)` | when the frame follows the binary |
+| attributes | | `surface = sphere`, `sphere_kind`, `sphere_radii`, `outside_value`, … |
+
+```python
+from sphere_tools import load_sphere, unit_vectors, area_weights, sqrt_gamma
+
+b = {c: load_sphere("%s__run_sphere.h5" % c) for c in ("Bx", "By", "Bz")}
+r_hat, th_hat, ph_hat = unit_vectors(b["Bx"]["theta"], b["Bx"]["phi"],
+                                     b["Bx"]["pole"][i], b["Bx"]["phi_zero"][i])
+B_r = sum(r_hat[d] * b[c]["data"][i, k] for d, c in enumerate(("Bx", "By", "Bz")))
+w = area_weights(n_theta, n_phi, radius)       # exact cell areas, sum = 4 pi r^2
+```
+
+`√γ Bⁱ` has zero coordinate divergence, so `Σ w √γ B_r` is the magnetic flux
+through the coordinate sphere with no further metric factor; its net value over
+a closed sphere is a check of the whole chain.
 
 ## Reading the output
 

@@ -150,8 +150,8 @@ class FrameTable(object):
         self.extras = dict(extras or {})
         self._row = {int(it): i for i, it in enumerate(self.iterations)}
 
-    def spec_at(self, iteration):
-        """The :class:`~plane_geom.PlaneSpec` for one iteration."""
+    def frame_at(self, iteration):
+        """``(origin, u_hat, v_hat, n_hat)`` at one iteration."""
         try:
             i = self._row[int(iteration)]
         except KeyError:
@@ -159,9 +159,11 @@ class FrameTable(object):
                 "no plane frame was precomputed for iteration %d; the frame "
                 "table was built from a different iteration list"
                 % int(iteration))
-        return PlaneSpec.from_frame(self.origin[i], self.u_hat[i],
-                                    self.v_hat[i], self.n_hat[i],
-                                    name=self.label)
+        return self.origin[i], self.u_hat[i], self.v_hat[i], self.n_hat[i]
+
+    def spec_at(self, iteration):
+        """The :class:`~plane_geom.PlaneSpec` for one iteration."""
+        return PlaneSpec.from_frame(*self.frame_at(iteration), name=self.label)
 
     def per_iteration_data(self, iterations):
         """The per-iteration datasets for the given iterations, in that order.
@@ -543,13 +545,15 @@ def plane_kind(plane):
 
 
 def build_frame_table(plane, iterations, times, sim=None, log=print,
-                      trajectory=None):
+                      trajectory=None, in_plane=True):
     """Build the :class:`FrameTable` for one variable's output iterations.
 
     ``sim`` is the SimDir (only needed to resolve ``auto`` values from the
     parfile) and ``trajectory`` an already-loaded :class:`Trajectory` to reuse
-    across variables. Raises ``ValueError`` on any bad specification; the
-    caller turns that into an abort.
+    across variables. ``in_plane`` False is for a frame that is not a plane
+    (the sphere backend's): the bodies are then not projected onto ``(u, v)``.
+    Raises ``ValueError`` on any bad specification; the caller turns that into
+    an abort.
     """
     iterations = np.asarray(iterations, dtype=np.int64)
     times = np.asarray(times, dtype=np.float64)
@@ -560,7 +564,8 @@ def build_frame_table(plane, iterations, times, sim=None, log=print,
     if kind == "analytic":
         return _analytic_table(plane, iterations, times, log)
     if kind == "trajectory":
-        return _trajectory_table(plane, iterations, times, sim, log, trajectory)
+        return _trajectory_table(plane, iterations, times, sim, log, trajectory,
+                                 in_plane)
     raise ValueError("unknown plane kind %r (use static, analytic or trajectory)"
                      % kind)
 
@@ -645,12 +650,15 @@ def _analytic_table(plane, iterations, times, log):
     return _finish(iterations, times, origin, n_raw, u_raw, "analytic", log)
 
 
-def _trajectory_table(plane, iterations, times, sim, log, trajectory):
+def _trajectory_table(plane, iterations, times, sim, log, trajectory,
+                      in_plane=True):
     """Frames tied to the binary: the separation vector lies in the plane.
 
     Either ``second_vector`` (the plane spans the separation and that vector, so
     both bodies are always in it) or ``normal`` (the orientation given directly,
-    for a plane not required to contain the separation) - not both.
+    for a plane not required to contain the separation) - not both. An
+    explicit ``u_axis: null`` projects the coordinate axis least aligned with
+    the normal, as for an analytic plane without one.
     """
     unknown = sorted(set(plane) - {"kind", "file", "time_offset", "origin",
                                    "second_vector", "normal", "u_axis",
@@ -714,14 +722,24 @@ def _trajectory_table(plane, iterations, times, sim, log, trajectory):
         n_raw = np.cross(d_hat, second)
         _check_span(n_raw, d_hat, second, times, log)
 
-    u_raw = _trajectory_u_axis(plane.get("u_axis", "separation"),
-                               d_hat, second, state, times, iterations, module)
+    u_spec = plane.get("u_axis", "separation")
+    u_raw = None if u_spec is None else _trajectory_u_axis(
+        u_spec, d_hat, second, state, times, iterations, module)
 
     log("  separation %.4f .. %.4f over the output; masses %.4f / %.4f"
         % (separation.min(), separation.max(), state.mass1[0], state.mass2[0]))
 
     table = _finish(iterations, times, origin, n_raw, u_raw,
                     "trajectory", log)
+
+    if not in_plane:
+        table.extras.update({"bh1_position": p1, "bh2_position": p2,
+                             "separation": separation})
+        for name, pos in (("bh1", p1), ("bh2", p2)):
+            dist = np.linalg.norm(pos - table.origin, axis=1)
+            log("  %s: %.4f .. %.4f from the frame's origin"
+                % (name, dist.min(), dist.max()))
+        return table
 
     # In-plane coordinates of the two bodies. Both sit at v = 0 whenever the
     # plane was built to contain the separation and the origin lies on the line

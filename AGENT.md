@@ -10,7 +10,7 @@ run after the fact, and the movie-encoding recipes.
 Written after the co-rotating meridional run described in §3, which is the
 worked example §1-6 refer to; §7-8 record the field-line congruence work and
 the single-snapshot cuts built on it, §9 what is still open, §10 the planes
-about each hole of the precessing 3C 186 run.
+about each hole of the precessing 3C 186 run, §11 the sphere resampler.
 
 ---
 
@@ -821,6 +821,56 @@ Trajectory `flip_20M_3C186_prod.h5` - spins nearly in the orbital plane
 
 ---
 
+## 11. Spheres from the 3D output (2026-10-17)
+
+`Resample/resample_sphere.py` (`Resample/README.md`, "Sampling spheres"): a
+uniform (θ, φ) grid - θ cell-centred, φ periodic - at one or several radii,
+each point from the finest level that covers it. A thin subclass of the 3D
+plane backend: `_add_component` now walks `spec.windows(...)` (index tuples
+into the output) instead of the plane's single (u, v) rectangle, so a
+`SphereSpec` (`sphere_geom.py`: exact shell test + bounding-ball cap, φ
+windows wrapping at 0) slots in. Centre / pole / φ = 0 are a plane's origin /
+normal / u axis, so `plane_motion` builds the moving frame (`centre: bh1`,
+`pole: spin1`, `phi_zero: separation`, `module` ...). Several radii: one pass,
+one file, `data[it, r, θ, φ]` chunked per (it, r) sheet; one radius:
+`data[it, θ, φ]`. `refinement_level: yes` (default for spheres) writes the
+supplying level per point from metadata alone; planes have it too (default
+no). `sphere_tools.py` reads it back (always 4D), gives r̂/θ̂/φ̂, exact cell
+areas, √γ.
+
+Verified (scratch tests, it = 204800 / 208896, cross output-0018/0019):
+plane xy incl. `dBx_dx`, the moving xz plane about BH1 incl. its frame
+datasets, and 2D xy all **bit-identical** to production after the refactor
+(chunked + merged); sphere values = trilinear interpolation by hand from the
+raw `*.xyz.file_*.h5` (finest owning component) to ≤ 3e-15 of the rms; r = 3
+sheet of a [2.5, 3, 4] run = the 1-radius run to ≤ 3e-14 of the rms (not
+bit-identical: the union hyperslab moves the interpolation's block origin);
+level 8 everywhere for r ≤ 4 about BH1; net/unsigned flux ≤ 3e-5.
+`python Resample/test_sphere_geom.py` → ALL OK (7200 random boxes, no grid
+point missed).
+
+- **Compare sign-changing fields against their rms**, not pointwise: B^i
+  and its derivatives cross zero, where a round-off difference of 1e-16 of the
+  rms is a "relative" 1e-11.
+- **Rank counts that divide `resample_chunks`** keep a rank on the same
+  iterations of every variable (geometry cache, shared TOCs); 50 ranks for
+  100 chunks gives each rank two iterations of all variables.
+
+$A/sphere_BH1/ (production, HHR flux run): r = 3 M about BH1, pole +z,
+φ = 0 along +x, 300 x 600 (one sample per level-8 cell), the 22
+`derivatives_xy` variables + `refinement_level`, 100 iterations; README.md,
+`Resample/test_sphere.py` → `tests.out` (ALL OK: raw-file interpolation at
+four times ≤ 3e-15 of the rms, level 8 everywhere, net/unsigned flux ≤ 8e-5).
+
+- **Cost:** job 7717, 2 gp nodes x 25 ranks, 2300 slices in 439 s; per slice
+  median 7 s (1.3-62 s, the cold first slice per rank and iteration being the
+  slow one), every TOC from `toc_cache`. A sphere slice touches ~61 of 4608
+  components (~50 MiB; three radii 2.5-4 M: ~90, ~145 MiB) against ~420 and
+  ~85 MiB for the 800² xy plane; cold slices cost the same ~30 s either way
+  (metadata), so several radii per run are nearly free.
+
+---
+
 ## 9. Open items
 
 1. ~~Open a PR `corot` → `main`~~ merged 2026-10-16 (PR #3, `9558ba2`).
@@ -846,4 +896,5 @@ Trajectory `flip_20M_3C186_prod.h5` - spins nearly in the orbital plane
    by more than 90° because the plane did (§10): e.g. keep the sign of a
    reference direction (n_raw itself for `second_vector` planes) and warn,
    rather than flipping v. Until then, check `plane_v_axis` of any plane
-   turning > 90° per output.
+   turning > 90° per output. The same holds for a sphere's pole (§11):
+   check `sphere_pole` of any pole turning > 90° per output.

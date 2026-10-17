@@ -36,7 +36,7 @@ So this backend walks the AMR components itself, mirroring what
 
 1. For each component, read only its **grid metadata** (origin/spacing/shape
    from the HDF5 attributes - no field data) and ask
-   :meth:`~plane_geom.PlaneSpec.uv_window` which corner of the ``(u, v)`` grid
+   :meth:`~plane_geom.PlaneSpec.windows` which corner of the ``(u, v)`` grid
    could possibly land inside it. Components the plane misses are skipped
    without ever touching their data, which is nearly all of them.
 2. For the ones it hits, read *only* the bounding box of the sample points that
@@ -70,6 +70,19 @@ the component's data, which is exactly enough for a stencil half-width of 2
 (accuracy 4) with ``nghost = 3``. A wider stencil than the ghost zones allow
 shrinks the region each component claims instead, so the next coarser level
 fills the band; this is logged once per variable.
+
+Other surfaces, and the refinement-level map
+--------------------------------------------
+Nothing above depends on the samples forming a plane. The surface is an object
+with ``points(*axes)`` (the 3D sample points, shaped like the output) and
+``windows(x0, x1, *axes)`` (index tuples into the output that can fall inside a
+component's box), so ``resample_sphere_data_postcactus.py`` subclasses this
+backend with a :class:`~sphere_geom.SphereSpec` - several concentric spheres
+in one pass, all read together component by component.
+
+``refinement_level: yes`` adds the output variable ``refinement_level``: the
+level whose component supplied each point (-1 where none does), from the same
+walk with the field reads left out. Default no for planes, yes for spheres.
 
 Component-geometry cache
 ------------------------
@@ -167,6 +180,11 @@ _STENCIL_HALO = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6}
 # very files this backend reads (a 2D config usually excludes exactly these).
 _SAMPLE_3D_NAMES = ("rho_b.xyz.h5", "rho_b.xyz.file_0.h5", "rho_b.file_0.h5")
 
+# The output variable holding, per sample point, the refinement level that
+# supplied it (`refinement_level: yes`). Its value is a level number, or -1
+# where no level covers the point.
+LEVEL_VAR = "refinement_level"
+
 
 class _GeometryMismatch(Exception):
     """A component's real geometry differs from the cached one."""
@@ -213,13 +231,17 @@ class Postcactus3DBackend(PostcactusBackend):
 
     name = "postcactus_3d"
 
+    #: What is sampled, for the log; the sphere backend says "sphere".
+    surface = "plane"
+
     def __init__(self):
         PostcactusBackend.__init__(self)
         self._axes_cache = None    # (u, v) in-plane axes; constant per run
         self._tables = None        # {var: FrameTable}, broadcast from rank 0
-        self._points_cache = None  # (key, (spec, u, v, X, Y, Z)) - last frame
+        self._points_cache = None  # (key, (spec, axes, (X, Y, Z))) - last frame
         self._reported = set()     # variables whose read stats were logged
         self._derivs = {}          # {output name: Derivative}, from the config
+        self._level_field = None   # field whose files LEVEL_VAR is mapped from
         self._geom_cache = {}      # {it: {(file key, level, comp): packed geometry}}
         self._uncacheable = set()  # fields whose geometry disagreed with the cache
         self._tocs = None          # toc_share.TocShare, if share_tocs
@@ -234,6 +256,7 @@ class Postcactus3DBackend(PostcactusBackend):
         :meth:`build_time_tables`, which is also where ``auto`` values are read
         from the parfile.
         """
+        cfg.setdefault("refinement_level", False)
         kind = plane_motion.plane_kind(cfg["plane"])
         if kind not in ("static", "analytic", "trajectory"):
             abort("unknown plane kind %r (use static, analytic or trajectory)"
@@ -254,6 +277,26 @@ class Postcactus3DBackend(PostcactusBackend):
                       "working directory)" % module)
             log("Plane: %s, resolved per iteration after the query" % kind)
 
+        resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
+        if any(n < 1 for n in resolution):
+            abort("grid.resolution must be >= 1 in each direction (got %r)"
+                  % (resolution,))
+        if any(a >= b for a, b in zip(min_corner, max_corner)):
+            abort("the in-plane grid needs min < max in both directions "
+                  "(got min %r, max %r)" % (min_corner, max_corner))
+        log("In-plane grid: %d x %d points over u %s, v %s"
+            % (resolution[0], resolution[1],
+               [min_corner[0], max_corner[0]], [min_corner[1], max_corner[1]]))
+
+        self._validate_3d_common(cfg)
+
+    def _validate_3d_common(self, cfg):
+        """The checks and defaults of any surface cut from 3D data.
+
+        Everything that does not depend on what is sampled: caches, the
+        interpolation order, derivatives, the refinement-level map and the
+        scan exclusions. Shared with the sphere backend.
+        """
         cfg.setdefault("outside_value", 0.0)
         cfg.setdefault("geometry_cache", True)
         cfg.setdefault("share_tocs", True)
@@ -267,18 +310,8 @@ class Postcactus3DBackend(PostcactusBackend):
             abort("interp_order must be 0..5 for the 3D backend (got %r)"
                   % cfg["interp_order"])
 
-        resolution, min_corner, max_corner = grid_bounds(cfg["grid"])
-        if any(n < 1 for n in resolution):
-            abort("grid.resolution must be >= 1 in each direction (got %r)"
-                  % (resolution,))
-        if any(a >= b for a, b in zip(min_corner, max_corner)):
-            abort("the in-plane grid needs min < max in both directions "
-                  "(got min %r, max %r)" % (min_corner, max_corner))
-        log("In-plane grid: %d x %d points over u %s, v %s"
-            % (resolution[0], resolution[1],
-               [min_corner[0], max_corner[0]], [min_corner[1], max_corner[1]]))
-
         self._validate_derivatives(cfg)
+        self._validate_levels(cfg)
 
         # A config copied from the 2D pipeline usually excludes 3D output.
         hidden = [p for p in cfg["simdir_exclude"]["files"]
@@ -318,6 +351,35 @@ class Postcactus3DBackend(PostcactusBackend):
             abort("nothing to do: `variables` is empty and no `derivatives` "
                   "were requested")
 
+    @staticmethod
+    def _validate_levels(cfg):
+        """Add the refinement-level map as an output variable, if asked for.
+
+        ``refinement_level: yes`` appends :data:`LEVEL_VAR`, which holds for
+        every sample point the level that supplied it (-1 where none does). It
+        is mapped from the files of one real field - the first plain variable,
+        else the first derivative's base field: all grid functions of a Carpet
+        run share one grid hierarchy (the geometry cache relies on the same
+        fact), so which one does not matter. Only component metadata is read,
+        never field data. The field is recorded in ``cfg["level_field"]`` so
+        that every rank knows it.
+        """
+        cfg["level_field"] = None
+        if not cfg.get("refinement_level"):
+            return
+        if LEVEL_VAR in cfg["variables"]:
+            abort("`refinement_level: yes` adds the output variable %r, which "
+                  "is also listed in `variables`" % LEVEL_VAR)
+        plain = [v for v in cfg["variables"] if v not in cfg["derivative_vars"]]
+        if plain:
+            field = plain[0]
+        else:
+            field = next(iter(cfg["derivative_vars"].values()))["field"]
+        cfg["level_field"] = field
+        cfg["variables"].append(LEVEL_VAR)
+        log("Refinement-level map: %s, from the grid hierarchy of %s"
+            % (LEVEL_VAR, field))
+
     def _derivative(self, cfg, var):
         """The :class:`~derivatives_3d.Derivative` behind ``var``, or None."""
         if cfg is not None:
@@ -335,9 +397,13 @@ class Postcactus3DBackend(PostcactusBackend):
             self._derivs = {
                 name: derivatives_3d.Derivative(d["field"], d["axes"])
                 for name, d in cfg["derivative_vars"].items()}
+        if self._level_field is None:
+            self._level_field = cfg.get("level_field")
 
     def _field(self, var):
         """The 3D field actually read for output variable ``var``."""
+        if var == LEVEL_VAR and self._level_field is not None:
+            return self._level_field
         deriv = self._derivs.get(var)
         return deriv.field if deriv is not None else var
 
@@ -366,6 +432,21 @@ class Postcactus3DBackend(PostcactusBackend):
             })
         else:
             attrs["plane"] = kind
+        attrs.update(self._variable_attrs(cfg, var))
+        return attrs
+
+    def _variable_attrs(self, cfg, var):
+        """Attributes that describe how ``var`` itself was obtained."""
+        self._configure(cfg)
+        attrs = {}
+        if var == LEVEL_VAR:
+            attrs.update({
+                "level_of": self._field(var),
+                "outside_value": -1.0,
+                "description": "refinement level whose component supplied each "
+                               "sample point (finest covering level, Carpet's "
+                               "ownership rule); -1 where none does",
+            })
         deriv = self._derivative(cfg, var)
         if deriv is not None:
             attrs.update({
@@ -419,14 +500,15 @@ class Postcactus3DBackend(PostcactusBackend):
 
         tables = {}
         for var, (iters, times) in var_iters.items():
-            log("Plane frames for %s (%d iteration(s), t = %g .. %g):"
-                % (var, len(iters), times[0], times[-1]))
+            log("%s frames for %s (%d iteration(s), t = %g .. %g):"
+                % (self.surface.capitalize(), var, len(iters), times[0],
+                   times[-1]))
             try:
                 tables[var] = plane_motion.build_frame_table(
                     cfg["plane"], iters, times, sim=sim, log=log,
-                    trajectory=trajectory)
+                    trajectory=trajectory, in_plane=self.surface == "plane")
             except ValueError as exc:
-                abort("plane: %s" % exc)
+                abort("%s: %s" % (self.surface, exc))
         return tables
 
     def set_time_tables(self, tables):
@@ -455,18 +537,26 @@ class Postcactus3DBackend(PostcactusBackend):
                                        label=spec.label, moving=False)
 
     def _frame(self, cfg, var, it):
-        """``(spec, u, v, X, Y, Z)`` for one iteration, cached where constant."""
+        """``(spec, axes, (X, Y, Z))`` for one iteration, cached where constant.
+
+        ``axes`` are the output grid's 1D axes (``(u, v)`` for a plane) and
+        ``X, Y, Z`` the sample points, each shaped like the output array.
+        """
         table = self._table_for(cfg, var)
         key = (var, int(it)) if table.moving else "static"
         if self._points_cache is not None and self._points_cache[0] == key:
             return self._points_cache[1]
 
-        u, v = self._axes(cfg)
-        spec = table.spec_at(it) if table.moving else table.spec_at(
-            table.iterations[0])
-        value = (spec, u, v) + spec.points(u, v)
+        axes = self._axes(cfg)
+        spec = self._spec_at(cfg, table,
+                             it if table.moving else table.iterations[0])
+        value = (spec, axes, spec.points(*axes))
         self._points_cache = (key, value)
         return value
+
+    def _spec_at(self, cfg, table, it):
+        """The sampled surface at one iteration of the frame table."""
+        return table.spec_at(it)
 
     def plane_index(self, sim, cfg):
         # The 3D omni reader. Same object type as sd.grid.<plane> in the 2D
@@ -528,9 +618,11 @@ class Postcactus3DBackend(PostcactusBackend):
         """Interpolate one iteration of ``var`` onto the plane.
 
         For a derivative variable, the base field is read and differentiated
-        per component before interpolation (see the module docstring).
+        per component before interpolation (see the module docstring). For
+        :data:`LEVEL_VAR` nothing is read or interpolated: each point gets the
+        number of the level that would have supplied it.
         """
-        spec, u, v, xs, ys, zs = self._frame(cfg, var, it)
+        spec, axes, points = self._frame(cfg, var, it)
         order = int(cfg["interp_order"])
         deriv = self._derivative(cfg, var)
         field = self._field(var)
@@ -542,8 +634,9 @@ class Postcactus3DBackend(PostcactusBackend):
             fd_trim = derivatives_3d.trim(deriv.axes, accuracy)
         # The interpolation stencil sits on top of the finite-difference one.
         halo = _STENCIL_HALO[order] + fd_trim
+        levels_only = var == LEVEL_VAR
 
-        out = np.full((u.size, v.size), float(cfg["outside_value"]))
+        out = np.full(points[0].shape, self._blank(cfg, var))
 
         src, cut = plane_index._get_src(field)
         if any(c is not None for c in cut):
@@ -563,8 +656,8 @@ class Postcactus3DBackend(PostcactusBackend):
         # slice, so the steady state carries no extra cost.
         report = var not in self._reported
         files = src._get_files(field, it)
-        args = (src, files, field, it, spec, u, v, xs, ys, zs, order, halo,
-                deriv, accuracy, fd_trim, report)
+        args = (src, files, field, it, spec, axes, points, order, halo,
+                deriv, accuracy, fd_trim, report, levels_only)
 
         tocs = self._tocs if cfg.get("share_tocs", True) else None
         n_shared = tocs.prepare(field, files) if tocs is not None else 0
@@ -580,7 +673,7 @@ class Postcactus3DBackend(PostcactusBackend):
                   "match %s's files at it=%d (%s); %s parses its own in that "
                   "directory from now on" % (rank, var, field, it, exc, field),
                   flush=True)
-            out.fill(float(cfg["outside_value"]))
+            out.fill(self._blank(cfg, var))
             n_parsed = sum(f._toc is None for f in files)
             n_shared = 0
             stats = self._composite_checked(out, cfg, var, field, it, args)
@@ -591,23 +684,29 @@ class Postcactus3DBackend(PostcactusBackend):
 
         if report:
             self._reported.add(var)
-            print("[rank %d] %s: plane touches %d of %d component(s) at it=%d, "
+            print("[rank %d] %s: %s touches %d of %d component(s) at it=%d, "
                   "%.1f MiB read, %.1f%% of the grid covered, geometry of %d "
                   "from the cache, tables of contents: %d shared, %d parsed"
-                  % (rank, var, stats["read"], stats["scanned"], it,
-                     stats["cells"] * 8 / 2 ** 20,
+                  % (rank, var, self.surface, stats["hit"], stats["scanned"],
+                     it, stats["cells"] * 8 / 2 ** 20,
                      100.0 * stats["covered"].mean(), stats["cached"],
                      n_shared, n_parsed),
                   flush=True)
             if stats["shrunk"]:
                 print("[rank %d] %s: WARNING the %d-cell stencil is wider than "
                       "the ghost zones of %d component(s); each claims less "
-                      "of the plane, so the next coarser level fills the band "
+                      "of the %s, so the next coarser level fills the band "
                       "(or outside_value where there is none, e.g. between "
                       "components of the coarsest level)"
-                      % (rank, var, fd_trim.max(), stats["shrunk"]),
+                      % (rank, var, fd_trim.max(), stats["shrunk"],
+                         self.surface),
                       flush=True)
         return out
+
+    @staticmethod
+    def _blank(cfg, var):
+        """What a sample point holds until some level supplies it."""
+        return -1.0 if var == LEVEL_VAR else float(cfg["outside_value"])
 
     def _composite_checked(self, out, cfg, var, field, it, args):
         """:meth:`_composite`, with the geometry cache where it holds."""
@@ -621,18 +720,18 @@ class Postcactus3DBackend(PostcactusBackend):
             print("[rank %d] %s: WARNING component geometry differs from the "
                   "cache (%s); %s is resampled without the geometry cache from "
                   "now on" % (rank, var, exc, field), flush=True)
-            out.fill(float(cfg["outside_value"]))
+            out.fill(self._blank(cfg, var))
             return self._composite(out, None, *args)
 
-    def _composite(self, out, cache, src, files, field, it, spec, u, v,
-                   xs, ys, zs, order, halo, deriv, accuracy, fd_trim, report):
+    def _composite(self, out, cache, src, files, field, it, spec, axes, points,
+                   order, halo, deriv, accuracy, fd_trim, report, levels_only):
         """Composite every component of one iteration onto ``out``; return stats.
 
         ``cache`` is this iteration's geometry cache, or None to read every
         component's attributes from the file. Raises :class:`_GeometryMismatch`
         if a cached geometry turns out to be wrong for ``field``.
         """
-        stats = {"scanned": 0, "read": 0, "cells": 0, "shrunk": 0, "cached": 0,
+        stats = {"scanned": 0, "hit": 0, "cells": 0, "shrunk": 0, "cached": 0,
                  "covered": np.zeros_like(out, dtype=bool) if report else None}
         # Coarse to fine, so finer refinement levels overwrite coarser ones.
         for level in sorted(src._get_levels(files, it)):
@@ -640,23 +739,31 @@ class Postcactus3DBackend(PostcactusBackend):
                 fkey = _file_key(h5file) if cache is not None else None
                 for comp in h5file.get_level_comps(it, level):
                     self._add_component(out, h5file, field, it, level, comp,
-                                        spec, u, v, xs, ys, zs, order, halo,
+                                        spec, axes, points, order, halo,
                                         stats, deriv, accuracy, fd_trim,
-                                        cache, (fkey, level, comp))
+                                        cache, (fkey, level, comp),
+                                        levels_only)
         return stats
 
     @staticmethod
     def _add_component(out, h5file, var, it, level, comp,
-                       spec, u, v, xs, ys, zs, order, halo, stats,
+                       spec, axes, points, order, halo, stats,
                        deriv=None, accuracy=None, fd_trim=None,
-                       cache=None, key=None):
-        """Composite one AMR component onto the plane, reading as little as possible.
+                       cache=None, key=None, levels_only=False):
+        """Composite one AMR component onto the output, reading as little as possible.
 
-        With ``deriv`` the plane gets that derivative of ``var`` instead,
+        ``spec.windows`` names the parts of the output grid (index tuples into
+        ``out`` and into each of ``points``) that can fall inside the component;
+        a plane has at most one such window, a sphere one or two per radius.
+        All points the component owns, over all windows, are read and
+        interpolated together.
+
+        With ``deriv`` the output gets that derivative of ``var`` instead,
         evaluated on the component's own grid before interpolation; ``halo``
         then already includes the stencil half-width ``fd_trim``. With
         ``cache`` (a dict) the component's geometry is taken from / stored
-        under ``key`` instead of being read from the file every time.
+        under ``key`` instead of being read from the file every time. With
+        ``levels_only`` the points get ``level`` and no field data is read.
         """
         # Metadata only - this touches the HDF5 attributes, not the field.
         stats["scanned"] += 1
@@ -686,22 +793,24 @@ class Postcactus3DBackend(PostcactusBackend):
         own1 = x1 - margin * dx
         if np.any(own1 <= own0):
             return
-        if not spec.intersects_box(own0, own1):
-            return
 
-        window = spec.uv_window(own0, own1, u, v)
-        if window is None:
+        # Exact test on the (small) candidate windows.
+        xs, ys, zs = points
+        hits = []
+        for window in spec.windows(own0, own1, *axes):
+            bx, by, bz = xs[window], ys[window], zs[window]
+            inside = ((bx >= own0[0]) & (bx <= own1[0]) &
+                      (by >= own0[1]) & (by <= own1[1]) &
+                      (bz >= own0[2]) & (bz <= own1[2]))
+            if inside.any():
+                hits.append((window, inside, bx[inside], by[inside], bz[inside]))
+        if not hits:
             return
-        i0, i1, j0, j1 = window
-
-        # Exact test on the (small) candidate window.
-        bx, by, bz = xs[i0:i1, j0:j1], ys[i0:i1, j0:j1], zs[i0:i1, j0:j1]
-        inside = ((bx >= own0[0]) & (bx <= own1[0]) &
-                  (by >= own0[1]) & (by <= own1[1]) &
-                  (bz >= own0[2]) & (bz <= own1[2]))
-        if not inside.any():
-            return
-        px, py, pz = bx[inside], by[inside], bz[inside]
+        if len(hits) == 1:
+            px, py, pz = hits[0][2:]
+        else:
+            px, py, pz = (np.concatenate([h[d] for h in hits])
+                          for d in (2, 3, 4))
 
         # A cached geometry decided that this component matters; before using
         # it to read, check it against the real one (the dataset is opened for
@@ -711,35 +820,42 @@ class Postcactus3DBackend(PostcactusBackend):
                 h5file._get_dataset(var, it, level, comp)))
             if not np.array_equal(real, row):
                 raise _GeometryMismatch("level %d component %d" % (level, comp))
+        stats["hit"] += 1
 
-        # Read just the box holding those points (plus the stencil halo, which
-        # read_comp adds itself); an HDF5 hyperslab, not the whole component.
-        lo = np.array([px.min(), py.min(), pz.min()])
-        hi = np.array([px.max(), py.max(), pz.max()])
-        block = h5file.read_comp(var, it, level, comp,
-                                bbox=[lo, hi, list(np.broadcast_to(halo, 3))])
-        if block is None:
-            return
-        stats["read"] += 1
-        stats["cells"] += block.data.size
+        if levels_only:
+            values = np.full(px.size, float(level))
+        else:
+            # Read just the box holding those points (plus the stencil halo,
+            # which read_comp adds itself); an HDF5 hyperslab, not the whole
+            # component.
+            lo = np.array([px.min(), py.min(), pz.min()])
+            hi = np.array([px.max(), py.max(), pz.max()])
+            block = h5file.read_comp(var, it, level, comp,
+                                    bbox=[lo, hi, list(np.broadcast_to(halo, 3))])
+            if block is None:
+                return
+            stats["cells"] += block.data.size
 
-        if deriv is not None:
-            # Differentiate on the native grid; the result covers the block
-            # minus the stencil half-width at each end of the derivative axes.
-            bdx = block.dx()
-            data, cut = derivatives_3d.differentiate(block.data, bdx,
-                                                     deriv.axes, accuracy)
-            block = gd.RegData(block.x0() + cut * bdx, bdx, data)
+            if deriv is not None:
+                # Differentiate on the native grid; the result covers the block
+                # minus the stencil half-width at each end of the derivative
+                # axes.
+                bdx = block.dx()
+                data, cut = derivatives_3d.differentiate(block.data, bdx,
+                                                         deriv.axes, accuracy)
+                block = gd.RegData(block.x0() + cut * bdx, bdx, data)
 
-        # One vectorised interpolation for all points of this component.
-        values = block.sample_generic([px, py, pz], order=order, mode="nearest")
+            # One vectorised interpolation for all points of this component.
+            values = block.sample_generic([px, py, pz], order=order,
+                                          mode="nearest")
 
-        target = out[i0:i1, j0:j1]
-        target[inside] = values
-        out[i0:i1, j0:j1] = target
-        if stats["covered"] is not None:
-            stats["covered"][i0:i1, j0:j1] |= inside
-
+        # Basic-slice windows are views of `out`, so this writes in place.
+        start = 0
+        for window, inside, hx, _, _ in hits:
+            out[window][inside] = values[start:start + hx.size]
+            start += hx.size
+            if stats["covered"] is not None:
+                stats["covered"][window] |= inside
 
 def main():
     run(Postcactus3DBackend())

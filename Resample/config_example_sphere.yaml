@@ -1,0 +1,129 @@
+# ---------------------------------------------------------------------------
+# Configuration for the 3D -> sphere resampling pipeline.
+#
+# Copy this file, edit it for your simulation, and run:
+#
+#     mpirun -n <N> python resample_sphere.py my_config_sphere.yaml
+#
+# This reads the FULL 3D output (*.xyz.h5 / *.file_*.h5), exactly like
+# resample_3d.py, and interpolates it onto spheres sampled on a uniform
+# (theta, phi) grid. Each point comes from the finest refinement level that
+# covers it. Everything outside the `sphere` block behaves as in
+# config_example_3d.yaml - see there for the options only listed here.
+#
+# Output: one HDF5 file per variable, <variable>__<label>.h5, with
+#   data    (n_iter, n_theta, n_phi)            one radius
+#           (n_iter, n_radii, n_theta, n_phi)   several radii
+#   x, y    theta, phi in radians;  radius (n_radii,)
+# and the sphere's frame as attributes (fixed) or per-iteration datasets
+# (moving): sphere_centre, sphere_pole, sphere_phi_zero.
+# ---------------------------------------------------------------------------
+
+backend: postcactus
+
+simdir: /lagoon/michailchabanov/BBH_production/my_run
+
+# THE SPHERE -----------------------------------------------------------------
+sphere:
+  # One radius, or several in increasing order. Several radii cost little
+  # more than one: the 3D data are read once per (variable, iteration) for all
+  # of them, and they share one file per variable (one HDF5 chunk per radius
+  # and iteration, so reading one radius is as cheap as from its own file).
+  radius: 3.0
+  # radius: [2.0, 3.0, 5.0]
+
+  # Grid points [n_theta, n_phi], shared by all radii. theta is cell-centred,
+  # theta_j = (j + 1/2) pi / n_theta (no points on the poles); phi_k =
+  # 2 pi k / n_phi. The spacing is r pi / n_theta in theta and 2 pi r / n_phi
+  # along the equator: match it to the spacing dx of the finest level covering
+  # the sphere (see refinement_level below), i.e. n_theta ~ pi r / dx and
+  # n_phi = 2 n_theta. Linear interpolation gains nothing from finer sampling.
+  resolution: [300, 600]
+
+  # The centre. Fixed: [x, y, z] (default [0, 0, 0]). Following the binary:
+  #   bh1 | bh2         that body's position
+  #   com | midpoint    mass-weighted centre / midpoint of the two bodies
+  #   module            origin(t, it) from `module`
+  centre: bh1
+
+  # The pole (theta = 0). Fixed: x | y | z | [a, b, c] (default z). Turning:
+  #   spin1 | spin2     that body's spin axis
+  #   orbital           the orbital angular momentum axis d x v_rel
+  #   module            normal(t, it) from `module`
+  pole: z
+
+  # Optional: the direction of phi = 0, projected perpendicular to the pole.
+  # Default: the coordinate axis least aligned with the pole (x for pole z).
+  #   x | y | z | [a, b, c]   fixed (inertial)
+  #   separation              towards the companion (co-rotating)
+  #   spin1 | spin2 | module
+  # phi_zero: x
+
+  # When anything above follows the binary, the trajectory file and the time
+  # offset t_trajectory = t_simulation + time_offset, as for a trajectory
+  # plane (config_example_3d.yaml). auto reads both from the parfile.
+  # file: auto
+  # time_offset: auto
+
+  # A Python module defining any of origin(t, it), normal(t, it) (the pole)
+  # and u_axis(t, it) (phi_zero), for `module` values above - see
+  # plane_module_example.py. Without anything following the binary, a module
+  # sphere takes its pole from the module (pole: module).
+  # module: ./my_sphere.py
+
+# The refinement-level map: one more output variable, refinement_level, with
+# the level that supplied each point (-1 where none does). It reads component
+# metadata only, never field data, so it costs a fraction of a variable.
+# Default for spheres: yes.
+refinement_level: yes
+
+# Reuse the SimDir pickle and TOC cache of other 3D analyses of the same run:
+# they read the same files.
+# simdir_pickle:
+#   pickled: yes
+#   path: ../../derivatives_xy/Resample/simdir_cache_3d.pkl
+# toc_cache: ../../toc_cache_3d.pkl
+
+simdir_exclude:
+  dirs: ["Checkpoint", "HDF5_1D", "HDF5_2D", "Miscellaneous"]
+  files: []
+
+label: my_run_sphere_BH1_r3
+output_dir: ./resampled_sphere_BH1_r3
+
+parallel_scan: yes
+scan_max_depth: 8
+
+interp_order: 1
+outside_value: 0.0
+geometry_cache: yes
+share_tocs: yes
+dtype: float64
+parallel_query: yes
+# variables x chunks >= ranks keeps every rank busy (see config_example_3d.yaml).
+resample_chunks: 1
+iteration_stride: 1
+iteration_min: null
+iteration_max: null
+compression_level: 4
+
+# Cartesian components, as for planes: project onto r-hat, theta-hat, phi-hat
+# afterwards (sphere_tools.unit_vectors). For the magnetic flux through the
+# sphere you need B^i and the metric (sqrt(gamma)).
+variables:
+  - rho_b
+  - Bx
+  - By
+  - Bz
+  - gxx
+  - gxy
+  - gxz
+  - gyy
+  - gyz
+  - gzz
+
+# Spatial derivatives work exactly as for planes (config_example_3d.yaml).
+# derivatives:
+#   accuracy: 4
+#   fields:
+#     Bx: [x, y, z]
