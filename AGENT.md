@@ -604,6 +604,37 @@ $A/derivatives_xz/
   the wrong-convention cut by only 1.9x (mostly twist here, |J_∥| = Ω_B/2π),
   the signed J^i/|B| by 3.1–4.6x, ∂_y α by 1.6x10⁴. Test signed components.
 
+### Two-plane movies about BH1 (2026-10-17)
+
+Both rows of each, xy (`derivatives_xy`) over the xz cut (`derivatives_xz`),
+the `Bz_Bphi` layout and machinery (centre = the cut's `bh1_position`), 2 x 3;
+no new resample. Field lines (`STREAM_PANELS`, panel key -> colour) only on
+the b^2/2P panels of the first, none in the second (user, 2026-10-17; the
+first renders, jobs 7709/7710, had them on every panel). Each Frames/ has make_frames.py,
+movie_config.yaml, job.batch (gp-default, 32 ranks, ~5 / ~1 min), README.md,
+tests + `tests.out` (ALL OK), and the PNGs + mp4.
+
+```
+$A/bernoulli_sigma_invbeta_BH1/Frames/     Be = -h_tot u_t - 1 (RdBu_r, linear +-0.1),
+                                           sigma (log [0.01, 10]),
+                                           b^2/2P (log [0.01, 100]); job 7713
+$A/shear_current_rho_BH1/Frames/           Sigma_B, |J|/|B| (linear [0, 5] /M),
+                                           rho_0 (jet, [1e-10, 1e-1]); job 7712
+```
+
+- **Be uses h_tot = 1 + ε + P/ρ₀ + b²/ρ₀** (user's choice after review; their
+  first draft had b²/(2ρ₀), which drops the field's energy density).
+  `BE_B2_FACTOR` switches it. u_t = W(−α + β_i v^i).
+- **`vel_i` is the Valencia velocity**: W from it matches `w_lorentz` to a
+  median 6e-6 (xy) / 1e-4 (cut), against 3e-2 / 3e-1 as u^i/u^0. Up to ~10%
+  apart where W ≈ 2 in the funnel (separate interpolation of W and v^i).
+- `test_planes.py` (same file in both) checks every panel's quantity on the
+  shared line z = 0 through BH1: 0.11–0.18 of the neighbouring-row change.
+- Lines on a jet ρ₀ panel should be white: cyan vanishes at ρ₀ ~ 1e-7.
+- `srun python make_frames.py` fails here (mpi4py, no PMI): test frames go
+  through `sbatch` + `mpirun -n 1`, writing under the Frames dir (compute
+  nodes cannot see the login node's /tmp).
+
 ---
 
 ## 8. Single-snapshot cuts through BH1 (t = 3020.8 M, 2026-10-06)
