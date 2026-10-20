@@ -36,6 +36,17 @@ conda activate etk-analysis
 shadow it with an MPI of its own. `ffmpeg`/`ffprobe` also live in
 `etk-analysis`, not in `base`.
 
+**numba** (2026-10-19, user): `pip install numba==0.61.2` in `etk-analysis`
+added only numba 0.61.2 and llvmlite 0.44.0 (pip freeze before/after);
+numpy stays the pip-installed 1.26.4. Do **not** `conda install numba`: it
+pulls numba 0.68 with a conda-forge numpy 2.4 next to the pip numpy 1.26 -
+two numpys and a major-version jump under postcactus. Verified after the
+install on a compute node: postcactus/mpi4py/h5py import, `test_sphere_geom.py`
+ALL OK, a sphere resample bit-identical to before; a parallel `@njit`
+trilinear interpolation of 2e6 points takes 0.011 s on 6 threads (scipy
+`map_coordinates` 0.28 s). For the field-line tracer. Undo: `pip uninstall
+numba llvmlite`.
+
 The launch line used on this cluster:
 
 ```bash
@@ -604,6 +615,41 @@ $A/derivatives_xz/
   the wrong-convention cut by only 1.9x (mostly twist here, |J_∥| = Ω_B/2π),
   the signed J^i/|B| by 3.1–4.6x, ∂_y α by 1.6x10⁴. Test signed components.
 
+### `derivatives_xz/ratios_current`: funnel mask on ρ₀ (2026-10-19)
+
+Re-rendered in place many times the same day (user); the current movie draws
+the boundary of a **funnel mask** on the ρ₀ panel, cell by cell:
+
+    mask = 0 where (Σ_B² − Ω_B²)/(Σ_B² + Ω_B²) ≥ 0 OR σ ≤ 1 OR B^z ≤ 0,
+    mask = 1 where none holds (ratio < 0, σ > 1, B^z > 0: the funnel),
+
+from the panels' own arrays (ratio unsmoothed), drawn as the mask's 0.5
+contour (white, 0.6 pt + 0.35 pt black edge, legend with the definition).
+`mask_criterion()` / `funnel_mask()` in `make_frames.py`; `MASK_*` (0 / 1 /
+0, `MASK_NEIGHBOURS` 0) and `CONTOUR_*` in `movie_config.yaml`;
+`CONTOUR_PANELS: {}` gives the 2026-10-07 movie back. Mask = 1 on 42 / 47 /
+60% of the cropped box at t = 0 / 2560 / 5068.8; the line follows the funnel
+walls. The last render ran on `debug` (24 ranks, 2.8 min): gp-default was
+full and the user said "run on debug".
+
+Tried and reverted the same day, each one config line (mask = 1 at the
+three times): `MASK_SQUEEZE_MIN: 0.1` (43 / 48 / 61%); `MASK_NEIGHBOURS: 4`
+- 0 only if the cell and its 4 face neighbours meet the criterion, an
+`ndimage.binary_erosion` with `border_value=1`, the funnel grown by one cell,
+~40% fewer contour vertices (49 / 52 / 65%); the latter with
+`MASK_SQUEEZE_MIN: -0.25` (44 / 48 / 62%). The mask was first asked with
+"and", corrected to "either" before the render. `test_contours.py` →
+`tests.out` ALL OK for every variant (criterion on hand-made cells incl.
+thresholds and NaN; neighbour option on small grids incl. a corner; mask =
+independent recomputation, shifted copies when neighbours are on; vertices
+on 0.5 to 9e-15, transposed array off by 0.5; style).
+
+History: first contours of the ratio itself at −0.9 / −0.75 / −0.5 / 0, then
+−0.1 alone (`{rho_b: squeeze}` + those levels). Those mesh the disk and
+sheath, where the ratio flips sign cell to cell - the mask boundary does
+not, because σ and B^z are smooth there and decide via "or". At 1.1 pt the
+four-level mesh hid ρ₀; 0.6 pt since.
+
 ### Two-plane movies about BH1 (2026-10-17)
 
 Both rows of each, xy (`derivatives_xy`) over the xz cut (`derivatives_xz`),
@@ -821,7 +867,11 @@ Trajectory `flip_20M_3C186_prod.h5` - spins nearly in the orbital plane
 
 ---
 
-## 11. Spheres from the 3D output (2026-10-17)
+## 11. Spheres from the 3D output (2026-10-17/18)
+
+Code: commit `e7f526a` on `integrals` (pushed 2026-10-17), after `ba0b3da`
+(the §7 two-plane movie notes). Movie and run directories are on /lagoon,
+outside the repo.
 
 `Resample/resample_sphere.py` (`Resample/README.md`, "Sampling spheres"): a
 uniform (θ, φ) grid - θ cell-centred, φ periodic - at one or several radii,
@@ -869,6 +919,34 @@ four times ≤ 3e-15 of the rms, level 8 everywhere, net/unsigned flux ≤ 8e-5)
   ~85 MiB for the 800² xy plane; cold slices cost the same ~30 s either way
   (metadata), so several radii per run are nearly free.
 
+$A/sphere_BH1/mollweide/Frames/ (movie, 2026-10-17): ρ₀, σ, b²/2P over
+B^z/|B|, B^φ/|B|, B^r/|B| on the whole sphere, Mollweide (longitude φ from +x
+at the centre, latitude 90° − θ, seen from outside; white dot = direction to
+BH2), the last plane movies' colour scales; job 7719 and a re-render after the
+seam fix below, one gp node, < 1 min each. Tests (ALL OK): projection on synthetic grids, the quantities against
+`Bz_Bphi`'s formulas, and the equator against the xy plane (correlation 0.99
+vs ~0 mirrored/turned).
+
+$A/sphere_BH1_r7/ (2026-10-18): the same at r = 7 M - 700 x 1400 (still one
+sample per level-8 cell, and level 8 everywhere: BH1's finest box has
+half-width 9 M), the 22 variables + `refinement_level`; job 7724, 1081 s on
+2 gp nodes x 25 ranks, 14 GB; ~230 components / ~400 MiB per slice, median
+20 s - at this radius the reads, not the metadata, set the cost. Tests ALL OK
+(raw-file interpolation ≤ 1.5e-15 of the rms, net/unsigned flux ≤ 3.7e-5).
+Movie `mollweide/Frames/`: the r = 3 script with the radius read from the
+files, < 2 min; equator vs xy plane correlation 0.996 / 0.994 (log ρ₀ / B^z).
+A panel is ~800 px for 1400 longitude cells, so the PNGs show about every
+second cell; average 2 x 2 before plotting if that ever looks grainy.
+`mollweide_rescaled/Frames/` (user, 2026-10-18): the same movie with σ on
+log [0.1, 10] and b²/2P on log [1, 100] - only `SIGMA_VMIN` / `IBETA_VMIN`
+and the output names differ from `mollweide/`; tests ALL OK.
+
+- **Mollweide in matplotlib:** `pcolormesh` on cell *edges* spanning exactly
+  [−π, π] x [−π/2, π/2]; the sphere cell on the ±180° seam is split between
+  both map edges (its column appears twice) so nothing is drawn outside the
+  ellipse. Compare the seam and the poles with a tolerance: 300·(π/300) is
+  not π, and a seam on a cell boundary otherwise yields a zero-width cell.
+
 ---
 
 ## 9. Open items
@@ -898,3 +976,128 @@ four times ≤ 3e-15 of the rms, level 8 everywhere, net/unsigned flux ≤ 8e-5)
    rather than flipping v. Until then, check `plane_v_axis` of any plane
    turning > 90° per output. The same holds for a sphere's pole (§11):
    check `sphere_pole` of any pole turning > 90° per output.
+9. **In-plane flux-tube integrals** (`~/in_plane_flux_tube_diagnostics.md`;
+   the reason for the `integrals` branch) - read and checked 2026-10-17,
+   **not started**; paused for the movies and the sphere resampler. The note:
+   detect in-plane tubes by the field component they carry, not by shape;
+   inside a tube mask Θ average the unsigned flux through half-planes
+   (toroidal tubes), cylinders (radial) and horizontal planes (vertical), one
+   number per time each; calibrate Θ with ∇·B = 0 (a drop in horizon flux
+   must reappear as vertical flux through the midplane); φ-t and R-t
+   diagrams; test the shear lag 1/(qΩ) between radial and toroidal events.
+   What was established for the HHR flux run:
+   - The integrals are exact with the Cartesian 𝓑ⁱ = √γ Bⁱ projected on the
+     flat R̂, φ̂, ẑ (the R of the coordinate change cancels): only √γ is
+     needed from the metric.
+   - The midplane version needs no resample: `2d_analysis/xy_plane/Resample`
+     has 397 frames (every 12.8 M, t = 0-5068.8, ±40 M) with B^i, γ_ij, P,
+     ρ₀, b², 1/β. The 3D xy plane has 100 frames, 51.2 M apart.
+   - The in-plane field does not vanish at z = 0 (medians of the flat-norm
+     ratios about the origin, t = 512 / 2560 / 4608): 3 < R < 10 M:
+     |B_R|/|B| 0.56-0.63, |B_φ|/|B| 0.57-0.65, |B^z|/|B| 0.25-0.32;
+     10 < R < 40 M: 0.29-0.50, 0.67-0.78, 0.18-0.32. Tubes just off the
+     midplane are still missed; a slab would need several 3D planes.
+   - Shear lag 1/(qΩ) = R^1.5/1.5 (Keplerian about the total mass): 21 M at
+     R = 10, 60 M at 20, 110 M at 30, so the 2D cadence resolves it for
+     R ≳ 11 M, the 3D one for R ≳ 25 M; inside the cavity it does not apply.
+   - Horizon calibration: not checked whether
+     `CactusAnalysis_BH1/BH2/Surface_integrals_BH*.asc` holds the horizon
+     flux, or `CactusAnalysis_Cavity30M` an outer-sphere flux. The sphere
+     resampler (§11) now gives fluxes directly. Upper-hemisphere √γ B^r flux
+     about BH1, code units, at t = 0 / 1280 / 2560 / 3840 / 5068.8:
+     r = 3 M 0.946 / 0.559 / 0.825 / 0.659 / 0.514, r = 7 M 0.952 / 0.769 /
+     1.035 / 0.893 / 0.566; net/unsigned ≤ 8e-5 and ≤ 4e-5
+     (`sphere_BH1*/Resample/test_sphere.py`). Only these five times were
+     printed; the full Φ(t) is a few lines with `sphere_tools`.
+   - Proposed first step (awaiting the user's go): one script on the 2D xy
+     data giving Φ̄_R, Φ̄_φ, Φ̄_z(t), the tube fractions and the φ-t / R-t
+     diagrams, with Θ = (β < β_c) ∧ (ρ₀ < ε x the azimuthal median ρ₀) and
+     the regions about the holes excluded; the horizon calibration after.
+     Also open: whether `2d_analysis/flux_tubes_scalars_xy/` (2026-09-28) is
+     the earlier tracking approach the note replaces - not yet opened.
+   - **Paused 2026-10-19 by the user ("i will return to that soon"); item
+     11 comes first. Brainstorm first, nothing decided or written yet.**
+     The user's request, as given: *"Let's continue
+     with the implementation of integrals similar to as laid out in the
+     document. Let's brainstorm for now. We have to decide on the data
+     format. Let's start with volume integrals first. Hence, we don't need any
+     resampling and can directly operate on raw data. Is it useful to use the
+     PyCactus facility or should we write an independent module? I want this
+     feature to seamlessly fit within the features we already have and be
+     consistent. But it can also be just a new folder akin to Resample called
+     Integrals."* To settle in that brainstorm: the output data format
+     (consistent with the per-variable HDF5 files of `Resample/`?); postcactus
+     (PyCactus) vs an independent module (the 3D backend already walks the
+     AMR components itself on postcactus' file layer); how to count each
+     volume once where refinement levels overlap; an `Integrals/` folder next
+     to `Resample/`. Possibly useful, not yet opened: the run's analysis tree
+     has `CactusVolumeIntegrals_BH1`, `_BH2`, `_Cavity30M`, `_Cavity50M`,
+     `_Cavity100M`.
+10. Spheres (§11). Done: r = 3 M and r = 7 M about BH1 (two separate runs,
+    `sphere_BH1/`, `sphere_BH1_r7/`), each with the Mollweide movie; r = 7 M
+    also with the narrower σ [0.1, 10] / b²/2P [1, 100] scales
+    (`mollweide_rescaled/`). Offered, not done: r = 3 M with those scales (the
+    same two-line config change), a map that turns with the binary (BH2 at
+    the centre: `CENTRE_LON` per frame from `bh2_position`), the same spheres
+    about BH2, further radii in one run (one pass, `radius: [...]` - cheaper
+    than separate runs), and the full flux time series Φ(t) for item 9.
+11. **NEXT (user, 2026-10-19) - field lines connected to BH1's horizon, from
+    the 3D data. Planned, nothing built yet.** Replaces, for now, the
+    brainstorm on cleaning the threshold funnel mask (§7: keep the
+    axis-connected component, fill enclosed holes - measured at t = 0 / 2560
+    / 5068.8: the axis-connected pieces hold 91-98% of the mask-1 area, the
+    rest 80-314 specks, 47-226 holes of median one cell; ideas: 4-connected
+    `ndimage.label` seeded on |x - x_BH1| ≤ 0.2 M, |z| ≥ 1 M, then
+    `binary_fill_holes` with the 4/8 connectivity pairing, on the full ±20 M
+    cut). The field-line definition is threshold-free: the funnel = points
+    whose field line threads BH1's horizon (the Blandford-Znajek flux).
+    - **Horizon (user):** the metric is analytic superposed Kerr-Schild, so
+      the horizons are analytic: m = 0.5, χ = 0.9, a = 0.45 M, r₊ = m(1 +
+      √(1 − χ²)) = 0.7179 M; in KS Cartesian coordinates the oblate spheroid
+      (x² + y²)/(r₊² + a²) + z²/r₊² = 1 - polar semi-axis 0.718 M (spin along
+      +z), equatorial √(2 m r₊) = 0.847 M - centred on `bh1_position` /
+      `bh2_position` from the trajectory table (boost v ≈ 0.09: 0.4%,
+      negligible). For comparison, AHFinderDirect ran in the simulation
+      (`output-*/Miscellaneous/BH_diagnostics.ah1.gp`): BH1 at t ≈ 2421 has
+      coordinate radius 0.786-0.936 M (mean 0.868), ~9-10% larger than the
+      analytic spheroid (the companion in the superposed metric, presumably;
+      not checked). Plan: terminate on the analytic spheroid; check that a
+      1.1x larger one changes the classification only for grazing lines.
+    - **Tracing needs only B^i** (a field line's shape does not depend on the
+      normalisation); the metric enters only the flux bookkeeping (√γ,
+      resampled or analytic). numba 0.61.2 installed for the tracer (§1).
+    - **Decided (user):** box ±10 M at 0.05 M about BH1 (401³, ~1.5 GB for
+      B^x, B^y, B^z) at one snapshot, t = 2560 M, as the proof of concept;
+      classify lines **started on the horizon** (seeds on BH1's spheroid,
+      θ x φ grid: footpoint map; horizon flux split into BH1-BH1 loops,
+      BH1-BH2, BH1-open (leaves the box: the jet field), undetermined at the
+      length cap).
+    - **3D mask (user wants one):** the recommendation the user answered with
+      "sounds great" - **confirm at the start**: trace the one line through
+      every voxel of a 0.1 M grid (201³ ≈ 8e6) in both directions through the
+      0.05 M field and code the voxel by its two ends (BH1-open, BH1-BH1,
+      BH1-BH2, BH1-undetermined, not BH1-connected, undetermined), optionally
+      with the horizon (θ, φ) its line lands on. Exact per point; rasterising
+      the horizon-started lines instead would leave gaps where lines diverge
+      (the funnel's cross-section grows ~100x from the horizon to the box
+      edge). Estimated, not measured: horizon seeds ~1e5 lines in seconds,
+      the voxel mask 10-30 min on one node per snapshot.
+    - **Build order:** (1) resample B^i onto the box - a box "surface" for
+      the 3D backend, or postcactus' own `read(geom=RegGeom(3D box))` as the
+      2D backend does for planes; (2) numba tracer (RK4, trilinear,
+      stopping at either horizon, the box edge or a length cap); (3) horizon
+      seeds -> footpoints, flux split; (4) voxel mask.
+    - **Format, as `Resample/`:** `fieldline_class__<label>.h5`, `data`
+      (n_iter, nx, ny, nz) uint8 codes, `x`/`y`/`z` axes relative to BH1 +
+      `bh1_position`, code legend and tracing settings as attributes;
+      optional `footpoint_theta/phi` files in the same layout; a small file
+      for the horizon-seed results.
+    - **Checks:** analytic fields (uniform field around a sphere, dipole,
+      split monopole); flux conservation (the flux of BH1-connected voxels
+      through the r = 3 / 7 M spheres = their horizon flux); convergence in
+      step, field spacing and length cap; horizon-started lines must cross
+      only BH1-connected voxels; compare the mask's xz slice with the
+      threshold funnel mask of §7.
+    - **Uses:** the funnel boundary for the movies; open item 3 (shear
+      integrated along field lines) needs this tracer; the BH1-connected
+      volume is a natural region for the volume integrals of item 9.
