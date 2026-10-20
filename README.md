@@ -6,6 +6,8 @@ Analysis and visualization pipeline for Einstein Toolkit simulation output.
 | ------------ | ------------------------------------------------------------------------ |
 | `Resample/`  | MPI-parallel resampling onto a regular grid, saved as HDF5 — either the 2D slices Carpet wrote, or an arbitrary plane cut out of the full 3D output. |
 | `Frames/`    | MPI-parallel rendering of movie frames (and mp4) from the HDF5 files.    |
+| `FieldLines/` | Field-line tracer on the raw 3D AMR output (numba): classifies points by where their line ends - a horizon, the box edge, the length cap. |
+| `Integrals/` | Flux integrals over spherical shells on the raw AMR grid points, split by field-line connectivity (magnetospheres vs the rest). |
 | `Notebooks/` | Interactive analysis; previews frames and writes the movie config.       |
 | `XScripts/`  | CarpetX / PlanesX openPMD (BP5/HDF5) inspection and plotting — a separate track, no postcactus/kuibit. |
 | `Archive/`   | Legacy pickle-based scripts and notebooks (superseded by the above).     |

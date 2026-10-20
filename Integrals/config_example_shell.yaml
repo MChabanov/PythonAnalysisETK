@@ -1,0 +1,49 @@
+# Flux integrals over a spherical shell, split by field-line connectivity.
+#   mpirun -n <N> python shell_integrals.py config_example_shell.yaml
+# See README.md. Keys not listed take the defaults shown.
+
+simdir: /lagoon/michailchabanov/BBH_production/inspiral_IGM_sameBHint_HHR_newcool_drift_mag_LorGrid_flux
+label: HHR_newcool_30M_flux_shell_BH1_r4-5
+output_dir: ./HHR_newcool_30M_flux_shell_BH1_r4-5
+
+shell:
+  centre: bh1           # bh1 | bh2 | com | midpoint | [x, y, z]
+  pole: z               # z | [a, b, c] | spin1 | spin2 | orbital
+  r_in: 4.0
+  r_out: 5.0
+  z_bin: 0.25           # bin width of the Phi_z profile in zeta = (x - centre).pole
+  axis_cells: 4.0       # cells this many spacings from the pole axis average 1/R over sub-points
+  subsamples: 8         # sub-points per axis for cut cells and near-axis cells (multiple of 4)
+  file: auto            # trajectory: AnalyticalSpacetime::traj_table_name
+  time_offset: auto     # simulation -> trajectory time: AnalyticalSpacetime::AST_t0
+
+fields:
+  B: [Bx, By, Bz]                              # B^i
+  metric: [gxx, gxy, gxz, gyy, gyz, gzz]       # for sqrt(gamma)
+
+tracer:
+  box_half_width: 12.0  # tracing box about the shell centre; lines leaving it end "exit"
+  step: 0.5             # RK4 step, in units of the local grid spacing
+  max_length: 200.0     # cap on each half-line; lines reaching it end "cap"
+  horizon_scale: 1.0    # Kerr-Schild horizon spheroids, semi-axes times this
+  extra_horizon_scales: [1.1]   # also record the classes for these larger horizons (same lines)
+  lookup_cell: 0.5      # cell of the block lookup grid [M]
+  margin: 3             # points read beyond the box, per side
+  batches: 20           # progress lines per iteration
+  threads: null         # numba threads; null = NUMBA_NUM_THREADS / all cores
+
+save_points: []         # iterations whose points__ file also gets lengths, end points, integrands
+
+# The SimDir and its iteration query, as for the resampling pipeline.
+simdir_pickle:
+  pickled: no
+  path: ./simdir_cache.pkl
+toc_cache: ./toc_cache.pkl
+simdir_exclude:
+  dirs: ["Checkpoint", "HDF5_1D", "HDF5_2D", "continuation_Frontera", "Miscellaneous"]
+  files: []
+parallel_scan: yes
+scan_max_depth: 4
+iteration_stride: 1
+iteration_min: null
+iteration_max: null

@@ -44,6 +44,7 @@ currently have postcactus only.
 | `sphere_tools.py`               | Read sphere output (`load_sphere`, always `(n_iter, n_radii, nθ, nφ)`), unit vectors r̂/θ̂/φ̂, exact cell areas, √γ. |
 | `config_example_sphere.yaml`    | Documented template config (3D → sphere).             |
 | `test_sphere_geom.py`           | Unit tests for `sphere_geom.py` (brute-force culling check); `python test_sphere_geom.py` → ALL OK. |
+| `amr_blocks.py`                 | Raw access to the 3D AMR components of one iteration: geometry of every component, owned boxes, reads of any variable on an index sub-box, shared tables of contents. Used by `../FieldLines/` and `../Integrals/`. |
 | `read_data.py`                  | Helpers to read the HDF5 output back into numpy.        |
 | `compare_output.py`             | Diff two output files — used to cross-check the 3D path against the 2D one. |
 
