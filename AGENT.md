@@ -84,7 +84,7 @@ couple of 800x800 float64 slices at a time, but not for the congruence scalars
 on a **whole** 800x800 plane (~1.3 GB per rank before the figure is drawn): the
 `*_box40` jobs ask for `--mem-per-cpu=4G`.
 
-### Four traps in batch scripts
+### Traps in batch scripts
 
 - **`$0` is not the script.** SLURM runs a spool copy, so `$0` is
   `/var/spool/slurmd/jobNNNNN/slurm_script` and `dirname "$0"` is meaningless.
@@ -100,6 +100,17 @@ on a **whole** 800x800 plane (~1.3 GB per rank before the figure is drawn): the
   aborts under a direct `srun` launch. Plain `python` inside an sbatch script
   works; for a quick one-off, `sbatch --wait -p debug -n 1 --wrap "..."`.
   Scripts that do not import mpi4py (`plot_snapshot.py`) are fine under srun.
+- **Plain `python` + mpi4py = pinned to ONE core** (2026-10-20). mpi4py makes
+  the process an MPI singleton and OpenMPI binds it to core 0, so numba (or
+  any) threads all share that core: `taskset -cp <pid>` showed affinity `0`,
+  32 threads at 100% total. `OMPI_MCA_hwloc_base_binding_policy=none` did
+  **not** help. Launch one threaded rank as `mpirun -n 1 --bind-to none ...`,
+  several as `mpirun ... --map-by ppr:4:node:PE=8` (each rank bound to its 8
+  cores); `Integrals/` scripts print `numba: N thread(s), M core(s)` and warn
+  when M < N.
+- **Logs through a pipe are block-buffered**: `python ... | grep -v x > log`
+  shows nothing until the end; use `grep --line-buffered`. `/usr/bin/time` does
+  not exist on the compute nodes (the job died at once).
 
 ### Judging success without `sacct`
 
@@ -949,6 +960,144 @@ and the output names differ from `mollweide/`; tests ALL OK.
 
 ---
 
+## 12. Shell integrals split by field-line connectivity (2026-10-20)
+
+**Where we left off (2026-10-20 ~12:50 EDT): production job 7793 running,
+not tracked (user logged off).** The code is committed on branch `integrals`
+(`9865c5f`, these notes in the commit after it), not pushed. Next session:
+check the run (below), then look at the results with the user.
+
+**Goal (user, 2026-10-20):** what the `integrals` branch is for - volume
+integrals over spherical shells, in production to track flux tubes through
+them, **with the holes' magnetospheres separated out**: every point of the
+integration domain (not of the whole box) is classified by whether its field
+line connects to a horizon. Decisions, all the user's:
+- shell **r = 4-5 M about BH1**, spherical (pole z = BH1's spin, centre
+  `bh1_position` from the trajectory, translated, not boosted);
+- the three integrals of `~/in_plane_flux_tube_diagnostics.md`, with 𝓑ⁱ =
+  √γ Bⁱ on flat unit vectors: (a) Φ_φ = (1/2π)∫|𝓑·φ̂|/**R** d³x - user wrote
+  "/r", chose the cylindrical R (the half-plane flux) when asked;
+  (b) Φ_r = ∫|𝓑·r̂| d³x / (r_out − r_in), spherical r̂ (flux through
+  spheres); (c) Φ_z = ∫|𝓑·ẑ| d³x / 2h with **h = r_out = 5 M** (all planes
+  crossing the shell; a ζ-binned profile is stored so a smaller h can be
+  applied later);
+- raw AMR data, no resampling; Python folder `Integrals/` (not the C++
+  `CactusVolumeIntegrals_*` tool in the run tree - **no validation against
+  it**: "self-consistent tests/checks are sufficient");
+- the tracer as a **standalone** package (`FieldLines/`), "for now only the
+  parts we need for the integral work" (no footpoint maps, voxel masks, CLI);
+- **record both horizon sizes** (analytic Kerr-Schild spheroid 1.0x and 1.1x,
+  ≈ AHFinderDirect's coordinate size) and **keep per-point classes for every
+  iteration** (both "yes", 2026-10-20).
+
+### Code (see each folder's README)
+
+- `Resample/amr_blocks.py` - `Snapshot`: the component hierarchy of one
+  iteration (geometry once, from one variable) and raw slab reads of any
+  variable, TOC sharing; `Component.owned_box()` = interior grown by half a
+  cell (the backends' ownership rule).
+- `FieldLines/` - `amr_field.AMRVectorField` (B on the AMR blocks meeting a
+  box, packed for numba, lookup grid → finest owning block),
+  `horizons.Horizons.kerr_schild` (spheroid ρ²/(r₊²+a²) + ζ²/r₊² < 1; m = 0.5,
+  χ = 0.9: 0.718 / 0.847 M), `tracer.trace` (RK4, step 0.5 x local dx,
+  trilinear, both ways; ends `BH1`/`BH2`/`exit`/`cap`/`null`; class = the
+  unordered pair; `extra_scales` gives the ends with enlarged horizons from
+  the same lines, exactly). `test_tracer.py` ALL OK.
+- `Integrals/shell_cells.py` - shell points with exact AMR weights (level L
+  minus what level L+1 owns; cut cells by 8³ sub-points jointly with the finer
+  boxes), integrands, per-class sums. `test_shell_cells.py` ALL OK.
+- `Integrals/shell_integrals.py` - MPI driver (iterations round-robin, numba
+  threads per rank); `check_tracer.py` - tracer variants on a seed subset;
+  `integrals_tools.py` - `load_integral`, `group(res, "horizon" | "no_horizon"
+  | "free" | "undetermined" | "BH1" | "total", horizon_scale=1.1)`,
+  `load_points`; `test_driver.py` (synthetic end-to-end: classes, 1.2x
+  horizon, restart reads ends, settings change retraces, layout) ALL OK.
+
+### Output (`$A/shell_BH1_r4-5/HHR_newcool_30M_flux_shell_BH1_r4-5/`)
+
+- `Phi_phi|Phi_r|Phi_z|volume__<label>.h5`: `data` (n_iter, n_hscale = 2,
+  n_class = 15), `horizon_scales` [1.0, 1.1], `classes` attribute
+  (`BH1-exit`, `exit-exit`, ...); `Phi_z` also `profile` (n_iter, 2, 15, 40),
+  `z_edges` (ζ bins of 0.25 M). **Written only at the end, by rank 0.**
+- `tracing__<label>.h5`: points/mean length per class, volume check, levels,
+  timings, horizons, `traced` (1 traced, 0 ends read).
+- `points__<label>__it<it>.h5`, one per iteration, written as each finishes
+  (tmp + rename, so existing = complete): positions, weights, levels, `ends`
+  (n, 2), `xends` (n, 2, 1) - **~4 MB** (ends compress to 0.1 MB); for
+  `save_points: [204800]` also lengths, end points, integrands (~400 MB).
+- **Restart / re-integration:** a rerun reads the ends of every iteration
+  whose `points__` file has the same settings (JSON in its `settings`
+  attribute) and the identical points, so it recomputes the sums in ~1 min
+  per iteration instead of tracing (~10 min on 32 cores). If 7793 died:
+  `cd $A/shell_BH1_r4-5 && sbatch -p gp-default job.batch` - only the
+  missing iterations are traced. New integrands/masks: same mechanism.
+
+### The run
+
+`$A/shell_BH1_r4-5/`: `config_shell_BH1_r4-5.yaml`, `job.batch` (4 gp
+nodes x 4 ranks x 8 threads, 12 h limit; log `job.out`/`job.err`). Job 7793
+started 12:42 EDT on gp-n[0035-0038]; 100 iterations (t = 0-5068.8);
+measured ~5,700 seeds/s per 8-thread rank → ~27 min per iteration, 7 rounds
+→ expected done **~16:00 EDT 2026-10-20**. Success:
+`grep Done job.out` → `Done: 100 iteration(s)`; `ls HHR_*/points__*.h5 | wc -l`
+→ 100; five `*__HHR_newcool_30M_flux_shell_BH1_r4-5.h5` files. Also in the
+directory: `check.batch`/`check.out` (the variant check below) and
+`test_t2560/` + `config_..._t2560.yaml` + `test_t2560.batch` (the one-iteration
+test, written by the code before `xends`/`settings` existed - its 398 MB
+`points__` file will not be reused; deletable).
+
+### Measured at t = 2560 M (it 204800; one node, 32 threads)
+
+8,719,294 shell points, all level 8; volume 255.5162 vs exact (+1e-7);
+3,432 near-axis cells. Shell + integrands 27-36 s, tracing field (±12 M box,
+all levels) 8.3 GB in 31-38 s, tracing 537 s (13,100 seeds/s); peak 10.4 GB.
+Classes: `BH1-exit` 4,100,586 points (46.9% of the volume), `exit-exit`
+4,615,859, capped 2,849; no `BH1-BH1` loops, nothing reaches BH2; median
+half-line 22 M. Integrals (code units): Φ_φ 0.1315 (magnetosphere 60.9%),
+Φ_r 1.9267 (64.7%), Φ_z 0.1655 (68.1%). Φ_r lies between the r = 3 and 7 M
+sphere fluxes (2 x upper hemisphere 1.65 / 2.07, §9 item 9) - plausible, not a
+test.
+
+Tracer variants (`check_tracer.py`, same 2e5 random seeds): step/2 → 0.065%
+of seeds change class, integrals equal to 4 digits; length cap 400 M →
+0.022%; box ±16 M → 0.19% (exit-exit → exit-cap; magnetosphere share
+unchanged); **horizons x1.1 → 1.7%**, magnetosphere 46.9 → 48.6% of the
+volume, 64.6 → 66.2% of Φ_r - the one setting that matters, hence both
+recorded.
+
+### Findings worth not rediscovering
+
+- **Shell boundary cells:** counting cut cells whole or not by their centre
+  left up to 1.5% volume error (tests), first order in dx and not averaging
+  out where a sphere runs parallel to grid planes - the poles of a shell
+  about a grid axis, or a refinement boundary just inside a sphere (level
+  faces at 4.625 vs r = 5: a whole layer of coarse cells cut by both). Fixed
+  by sub-sampled fractions taken jointly with the finer level's boxes; with
+  m = 8 (multiple of 4: refinement edges fall on quarter cells) the volume
+  error is ≤ 1e-4 and the analytic integrals agree to ≤ 2e-4.
+- **Near the pole axis** |𝓑·φ̂|/R is singular for any field with a component
+  across the axis; one point 1e-7 off the axis made Φ_φ 3,700x too large.
+  Cells within 4 dx of the axis average it over 8³ sub-points (exact cell
+  integral of the piecewise-constant data); what remains is first order in
+  dx, ~1e-3 for a uniform field across the axis.
+- A test field B_φ ∝ 1/R (a line current) cannot test the axis treatment:
+  constant-per-cell data cannot represent it there. Use a field regular on
+  the axis (B_φ ∝ R) and a uniform field across it.
+
+### Not done / offered
+
+- Look at the results with the user: Φ(t) per group, both horizon scales.
+- Self-consistency of Φ_r against the sphere resampler (radii 4.05..4.95,
+  mean of the unsigned sphere flux) - not run.
+- φ- and R-binned profiles (space-time diagrams of the note), the β/ρ tube
+  criterion Θ of the note on top of the classes, other integrands: no
+  tracing needed - the restart mechanism reads the ends from the `points__`
+  files, only the variables are read again (~1 min per iteration).
+- Other shells (radii, about BH2 or the binary) and the horizon calibration
+  (∇·B) need new traces.
+
+---
+
 ## 9. Open items
 
 1. ~~Open a PR `corot` → `main`~~ merged 2026-10-16 (PR #3, `9558ba2`).
@@ -958,7 +1107,9 @@ and the output names differ from `mollweide/`; tests ALL OK.
    the xz plane about BH2 at t = 4403.2 (§8). Σ_B Δx (resolution) not done.
    BH2 versions of the movies if wanted. The xz-through-BH1 plane
    (`derivatives_xz`, §7) has the congruence movie and both ratios movies.
-3. Integrated shear along field lines (eq. 57) — needs field-line tracing.
+3. Integrated shear along field lines (eq. 57) — needs field-line tracing;
+   the tracer exists now (`FieldLines/`, §12), integrating along a line is
+   not built.
 4. ~~3D backend speed: stop re-parsing TOCs~~ done 2026-10-05 (`share_tocs`,
    `toc_cache`; −29 to −34% per cold slice). Left: the 64 file opens per
    variable per slice (8–15 s) and the first variable's metadata pass at an
@@ -1015,24 +1166,18 @@ and the output names differ from `mollweide/`; tests ALL OK.
      the regions about the holes excluded; the horizon calibration after.
      Also open: whether `2d_analysis/flux_tubes_scalars_xy/` (2026-09-28) is
      the earlier tracking approach the note replaces - not yet opened.
-   - **Paused 2026-10-19 by the user ("i will return to that soon"); item
-     11 comes first. Brainstorm first, nothing decided or written yet.**
-     The user's request, as given: *"Let's continue
-     with the implementation of integrals similar to as laid out in the
-     document. Let's brainstorm for now. We have to decide on the data
-     format. Let's start with volume integrals first. Hence, we don't need any
-     resampling and can directly operate on raw data. Is it useful to use the
-     PyCactus facility or should we write an independent module? I want this
-     feature to seamlessly fit within the features we already have and be
-     consistent. But it can also be just a new folder akin to Resample called
-     Integrals."* To settle in that brainstorm: the output data format
-     (consistent with the per-variable HDF5 files of `Resample/`?); postcactus
-     (PyCactus) vs an independent module (the 3D backend already walks the
-     AMR components itself on postcactus' file layer); how to count each
-     volume once where refinement levels overlap; an `Integrals/` folder next
-     to `Resample/`. Possibly useful, not yet opened: the run's analysis tree
-     has `CactusVolumeIntegrals_BH1`, `_BH2`, `_Cavity30M`, `_Cavity50M`,
-     `_Cavity100M`.
+   - **Built 2026-10-20 as shell integrals, §12** - the brainstorm's
+     questions settled there: an `Integrals/` folder in Python on the raw
+     AMR points, postcactus' file layer through `Resample/amr_blocks.py`,
+     per-quantity HDF5 files like `Resample/`, each volume counted once by
+     exact weights of the finest owning level. The production geometry is
+     spherical shells about a hole with the magnetosphere separated by
+     field-line connectivity, not the midplane annulus/slab with a β/ρ mask
+     proposed above (that remains possible: Θ can be applied on top of the
+     classes). The run tree's `CactusVolumeIntegrals_*/` is Lorenzo
+     Ennoggi's C++ volume-integral code (spherical volumes, 0.847 M spheres
+     cut about each hole, pointwise masks); the user does not want it as a
+     validation reference.
 10. Spheres (§11). Done: r = 3 M and r = 7 M about BH1 (two separate runs,
     `sphere_BH1/`, `sphere_BH1_r7/`), each with the Mollweide movie; r = 7 M
     also with the narrower σ [0.1, 10] / b²/2P [1, 100] scales
@@ -1041,63 +1186,19 @@ and the output names differ from `mollweide/`; tests ALL OK.
     the centre: `CENTRE_LON` per frame from `bh2_position`), the same spheres
     about BH2, further radii in one run (one pass, `radius: [...]` - cheaper
     than separate runs), and the full flux time series Φ(t) for item 9.
-11. **NEXT (user, 2026-10-19) - field lines connected to BH1's horizon, from
-    the 3D data. Planned, nothing built yet.** Replaces, for now, the
-    brainstorm on cleaning the threshold funnel mask (§7: keep the
-    axis-connected component, fill enclosed holes - measured at t = 0 / 2560
-    / 5068.8: the axis-connected pieces hold 91-98% of the mask-1 area, the
-    rest 80-314 specks, 47-226 holes of median one cell; ideas: 4-connected
-    `ndimage.label` seeded on |x - x_BH1| ≤ 0.2 M, |z| ≥ 1 M, then
-    `binary_fill_holes` with the 4/8 connectivity pairing, on the full ±20 M
-    cut). The field-line definition is threshold-free: the funnel = points
-    whose field line threads BH1's horizon (the Blandford-Znajek flux).
-    - **Horizon (user):** the metric is analytic superposed Kerr-Schild, so
-      the horizons are analytic: m = 0.5, χ = 0.9, a = 0.45 M, r₊ = m(1 +
-      √(1 − χ²)) = 0.7179 M; in KS Cartesian coordinates the oblate spheroid
-      (x² + y²)/(r₊² + a²) + z²/r₊² = 1 - polar semi-axis 0.718 M (spin along
-      +z), equatorial √(2 m r₊) = 0.847 M - centred on `bh1_position` /
-      `bh2_position` from the trajectory table (boost v ≈ 0.09: 0.4%,
-      negligible). For comparison, AHFinderDirect ran in the simulation
-      (`output-*/Miscellaneous/BH_diagnostics.ah1.gp`): BH1 at t ≈ 2421 has
-      coordinate radius 0.786-0.936 M (mean 0.868), ~9-10% larger than the
-      analytic spheroid (the companion in the superposed metric, presumably;
-      not checked). Plan: terminate on the analytic spheroid; check that a
-      1.1x larger one changes the classification only for grazing lines.
-    - **Tracing needs only B^i** (a field line's shape does not depend on the
-      normalisation); the metric enters only the flux bookkeeping (√γ,
-      resampled or analytic). numba 0.61.2 installed for the tracer (§1).
-    - **Decided (user):** box ±10 M at 0.05 M about BH1 (401³, ~1.5 GB for
-      B^x, B^y, B^z) at one snapshot, t = 2560 M, as the proof of concept;
-      classify lines **started on the horizon** (seeds on BH1's spheroid,
-      θ x φ grid: footpoint map; horizon flux split into BH1-BH1 loops,
-      BH1-BH2, BH1-open (leaves the box: the jet field), undetermined at the
-      length cap).
-    - **3D mask (user wants one):** the recommendation the user answered with
-      "sounds great" - **confirm at the start**: trace the one line through
-      every voxel of a 0.1 M grid (201³ ≈ 8e6) in both directions through the
-      0.05 M field and code the voxel by its two ends (BH1-open, BH1-BH1,
-      BH1-BH2, BH1-undetermined, not BH1-connected, undetermined), optionally
-      with the horizon (θ, φ) its line lands on. Exact per point; rasterising
-      the horizon-started lines instead would leave gaps where lines diverge
-      (the funnel's cross-section grows ~100x from the horizon to the box
-      edge). Estimated, not measured: horizon seeds ~1e5 lines in seconds,
-      the voxel mask 10-30 min on one node per snapshot.
-    - **Build order:** (1) resample B^i onto the box - a box "surface" for
-      the 3D backend, or postcactus' own `read(geom=RegGeom(3D box))` as the
-      2D backend does for planes; (2) numba tracer (RK4, trilinear,
-      stopping at either horizon, the box edge or a length cap); (3) horizon
-      seeds -> footpoints, flux split; (4) voxel mask.
-    - **Format, as `Resample/`:** `fieldline_class__<label>.h5`, `data`
-      (n_iter, nx, ny, nz) uint8 codes, `x`/`y`/`z` axes relative to BH1 +
-      `bh1_position`, code legend and tracing settings as attributes;
-      optional `footpoint_theta/phi` files in the same layout; a small file
-      for the horizon-seed results.
-    - **Checks:** analytic fields (uniform field around a sphere, dipole,
-      split monopole); flux conservation (the flux of BH1-connected voxels
-      through the r = 3 / 7 M spheres = their horizon flux); convergence in
-      step, field spacing and length cap; horizon-started lines must cross
-      only BH1-connected voxels; compare the mask's xz slice with the
-      threshold funnel mask of §7.
-    - **Uses:** the funnel boundary for the movies; open item 3 (shear
-      integrated along field lines) needs this tracer; the BH1-connected
-      volume is a natural region for the volume integrals of item 9.
+11. Field lines connected to BH1's horizon (user, 2026-10-19). **Superseded
+    2026-10-20 by §12**: the user wants the classification at the points of
+    the integration domain only, so the tracer works on the raw AMR blocks
+    (no resampled ±10 M box at 0.05 M) and classifies the shell's points;
+    the 2026-10-19 plan's horizon-seeded footpoint maps and the 3D voxel
+    mask were **not built**. Still parked: cleaning the threshold funnel mask
+    of §7 (axis-connected component + filled holes; the axis-connected
+    pieces hold 91-98% of the mask-1 area at t = 0 / 2560 / 5068.8, the rest
+    80-314 specks, 47-226 one-cell holes) - the field-line classification on
+    an xz plane's points (`tracer.trace` with plane points as seeds) would
+    give the threshold-free funnel instead. The analytic horizons vs
+    AHFinderDirect (`output-*/Miscellaneous/BH_diagnostics.ah1.gp`: BH1 at
+    t ≈ 2421 has coordinate radius 0.786-0.936 M, mean 0.868, ~9-10% above
+    the analytic 0.718 / 0.847 M; why is not checked) is why §12 records the
+    classes for 1.1x horizons too.
+12. **NEXT: §12** - check job 7793, then the results with the user.
